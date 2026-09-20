@@ -1,0 +1,59 @@
+{
+  "name": "@comecaramelos/dsh-hover-information",
+  "description": "DSH plugin: richer session hover cards — corner icons that copy the session id and workspace path, a configurable metrics block (turns, steps, tokens, compactions, context, subagents, …) fed by the hoverInfo projection + Typert remote, all gated by a Settings → Plugins card",
+  "version": "0.0.1",
+  "author": "Robe ComeCaramelos <hello@comecaramelos.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ComeCaramelos/dsh-hover-information.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ComeCaramelos/dsh-hover-information/issues"
+  },
+  "homepage": "https://github.com/ComeCaramelos/dsh-hover-information#readme",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./remote": "./lib/remote.js",
+    "./unit": "./lib/unit.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml"
+  ],
+  "scripts": {
+    "test": "node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ]
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.5-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.2",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

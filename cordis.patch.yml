@@ -1,0 +1,14 @@
+# @comecaramelos/dsh-hover-information — bundle patch.
+#
+# Host plane: registers the `hover-info` settings namespace whose single
+# `active` flag gates the browser enhancer (lib/client.js). The whole card
+# enhancement lives browser-side in this increment: no host services beyond
+# the settings section. The metrics phases in docs/PLAN.md will add the
+# `hoverInfo` projection unit and the `hoverInfo` Typert remote through this
+# same plugin row — this patch line will not change for them.
+- insert:
+    - id: hover-info
+      name: "@comecaramelos/dsh-hover-information"
+      config:
+        # Base layer for the settings namespace; user edits resolve above it.
+        active: true
