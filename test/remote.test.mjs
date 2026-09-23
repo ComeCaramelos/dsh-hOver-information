@@ -7,14 +7,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { remoteMethods } from "@deepseek-ai/dsh-typert-protocol";
-import { HoverInfoRemote } from "../lib/remote.js";
+import { HoverInfoRemote } from "../lib/index.js";
 
 /** Minimal live-session face: id + header + no log (projections faked). */
 function session(id, header = {}) {
 	return { id, header };
 }
 
-function makeRemote({ sessions = [], agents = new Map(), projectionValues = {}, registryThrows = false } = {}) {
+function makeRemote({ sessions = [], agents = new Map(), projectionValues = {}, registryThrows = false, jobs = void 0 } = {}) {
 	const registry = {
 		snapshot(target, keys) {
 			if (registryThrows) throw new Error("registry unavailable");
@@ -30,17 +30,40 @@ function makeRemote({ sessions = [], agents = new Map(), projectionValues = {}, 
 			if (name === "sessions") return { list: () => sessions, get: (id) => sessions.find((item) => item.id === id) };
 			if (name === "agents") return { get: (id) => agents.get(id) };
 			if (name === "sessionProjections") return registry;
+			if (name === "jobs") return jobs;
 			return void 0;
 		}
 	};
 	return new HoverInfoRemote(ctx);
 }
 
-test("the prototype descriptor registers both methods as direct remotes", () => {
+/**
+ * A fake `ctx.jobs` shaped like `LocalJobRegistry`: id → live record, with
+ * the caller/owner check and the terminal-status short-circuit of the real
+ * kill (the "unknown job" throw included).
+ */
+function makeJobs(records = []) {
+	const byId = new Map();
+	for (const record of records) byId.set(record.id, record);
+	return {
+		kills: [],
+		kill(id, caller, reason) {
+			this.kills.push({ id, caller: caller ? caller.id : void 0, reason });
+			const job = byId.get(id);
+			if (job === void 0) throw new Error(`unknown job ${id}`);
+			if (job.owner !== void 0 && job.owner.id !== (caller ? caller.id : void 0)) throw new Error(`job ${id} belongs to another session`);
+			if (job.status === "completed" || job.status === "killed" || job.status === "failed") return "already-finished";
+			return "requested";
+		}
+	};
+}
+
+test("the prototype descriptor registers all three methods as direct remotes", () => {
 	const remote = makeRemote({});
 	assert.deepEqual(remoteMethods(remote), [
 		{ method: "sessions", invocation: { kind: "direct" } },
-		{ method: "stats", invocation: { kind: "direct" } }
+		{ method: "stats", invocation: { kind: "direct" } },
+		{ method: "killJob", invocation: { kind: "direct" } }
 	]);
 });
 
@@ -124,4 +147,37 @@ test("stats() fails open with typed errors", () => {
 
 	const broken = makeRemote({ sessions: [session("x", {})], registryThrows: true });
 	assert.throws(() => broken.stats("x"), (error) => error.code === "hoverInfo/not-loaded");
+});
+
+test("killJob() hands the registry the owning agent as caller and maps the outcome", () => {
+	const jobs = makeJobs([
+		{ id: "j1", owner: { id: "s1" }, status: "running" },
+		{ id: "j2", owner: { id: "s1" }, status: "completed" }
+	]);
+	const remote = makeRemote({
+		sessions: [session("s1", {})],
+		agents: new Map([["s1", { id: "s1", status: "idle" }]]),
+		jobs
+	});
+	assert.deepEqual(remote.killJob("s1", "j1"), { outcome: "requested" });
+	assert.deepEqual(jobs.kills, [{ id: "j1", caller: "s1", reason: void 0 }], "kill(id, agent) — the caller is the owning agent");
+	assert.deepEqual(remote.killJob("s1", "j2"), { outcome: "already-finished" });
+});
+
+test("killJob() fails open with typed errors", () => {
+	// No registry composed at all.
+	const noJobs = makeRemote({ sessions: [session("s1", {})], agents: new Map([["s1", { id: "s1" }]]) });
+	assert.throws(() => noJobs.killJob("s1", "x"), (error) => error.code === "hoverInfo/jobs-unavailable");
+
+	// Registry composed, session not live (an owned job needs its agent).
+	const dead = makeRemote({ sessions: [], jobs: makeJobs([{ id: "j1", owner: { id: "s1" }, status: "running" }]) });
+	assert.throws(() => dead.killJob("s1", "j1"), (error) => error.code === "hoverInfo/session-not-found");
+
+	// Live session, unknown job id.
+	const live = makeRemote({
+		sessions: [session("s1", {})],
+		agents: new Map([["s1", { id: "s1" }]]),
+		jobs: makeJobs([{ id: "j1", owner: { id: "s1" }, status: "running" }])
+	});
+	assert.throws(() => live.killJob("s1", "nope"), (error) => error.code === "hoverInfo/job-not-found");
 });

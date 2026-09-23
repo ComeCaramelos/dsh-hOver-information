@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { createDom, makeCard, attachFiber, makePreview, attachPropsFiber } from "./dom.mjs";
+import { createDom, makeCard, attachFiber, makePreview, attachPropsFiber, makeModelSeat, makeJobMenu } from "./dom.mjs";
 
 const requireCjs = createRequire(import.meta.url);
 
@@ -70,11 +70,13 @@ const bundle = loaded.factory((id) => {
 	}
 });
 
-test("the bundle exports apply plus the card/enhancer halves and the inject list", () => {
+test("the bundle exports the apply surface, the inject list and the cache budgets", () => {
 	assert.equal(typeof bundle.apply, "function");
-	assert.equal(typeof bundle.applyCard, "function");
-	assert.equal(typeof bundle.applyEnhancer, "function");
 	assert.deepEqual(bundle.inject, ["sessions", "connection", "locale", "settingsScope", "slots"]);
+	// The card/enhancer halves mount from `apply`; the budgets pin the cache
+	// TTL (host default) and the failed-attempt retry ceiling.
+	assert.equal(bundle.DEFAULT_REFRESH_MS, 30000);
+	assert.equal(bundle.FAILURE_RETRY_MS, 3000);
 });
 
 const NOW = Date.now();
@@ -82,6 +84,8 @@ const NOW = Date.now();
 /** Default composed settings snapshot for the browser half. */
 const BASE_SETTINGS = {
 	active: true,
+	showPreviewTools: true,
+	showModelProvider: true,
 	refreshMs: 30000,
 	showTurns: true,
 	showSteps: true,
@@ -89,6 +93,7 @@ const BASE_SETTINGS = {
 	showTokensOut: true,
 	showCacheRead: true,
 	showCompactions: true,
+	showPurges: true,
 	showContext: true,
 	showSubagents: true,
 	showModel: true,
@@ -107,8 +112,8 @@ const WORKSPACE_TIME_EN = {
 };
 
 /** A session store snapshot face matching `sessions.list.getSnapshot()`. */
-function store(byId) {
-	return { list: { getSnapshot: () => ({ ids: Object.keys(byId), byId }), subscribe: () => () => {} } };
+function store(byId, jobsBySession) {
+	return { list: { getSnapshot: () => ({ ids: Object.keys(byId), byId, jobsBySession }) }, subscribe: () => () => {} };
 }
 
 /** A stats payload shaped like the host `hoverInfo/stats` result. */
@@ -121,6 +126,7 @@ function statsPayload(overrides = {}) {
 		cacheRead: 0,
 		cacheWrite: 0,
 		compactions: 1,
+		purges: 2,
 		subagentsSpawned: 2,
 		toolCalls: 12,
 		llmMs: 4000,
@@ -176,7 +182,7 @@ function makeScope(overrides = {}) {
 	return scope;
 }
 
-function setup({ sessions = store({}), settings = {}, stats = null, withSlots = false, dom = createDom() } = {}) {
+function setup({ sessions = store({}), settings = {}, stats = null, withSlots = false, dom = createDom(), preApply = null } = {}) {
 	// Interval accounting: `created`/`cleared` track the lazy sweep heartbeat
 	// (started with the first open card/preview, stopped with the last one),
 	// `unrefCalls` proves the client un-refs the Node timer handle so a
@@ -248,6 +254,12 @@ function setup({ sessions = store({}), settings = {}, stats = null, withSlots = 
 			else if (ns === "hoverInfo") {
 				const entry = locale.registered.find((registered) => registered.ns === "hoverInfo");
 				template = (entry && entry.dict.en[key]) ?? key;
+			} else {
+				// Any other dictionary the shell registered (the background-job
+				// list's `job` namespace in particular) — the enhancer reads
+				// the shell's own strings through the same registry.
+				const entry = locale.registered.find((registered) => registered.ns === ns);
+				template = (entry && entry.dict.en[key]) ?? key;
 			}
 			if (!params) return template;
 			return template.replace(/\{(\w+)\}/g, (match, name) => (name in params ? String(params[name]) : match));
@@ -297,12 +309,16 @@ function setup({ sessions = store({}), settings = {}, stats = null, withSlots = 
 		}
 	};
 
+	// Runs before `apply` (the locale-dictionary + open-menu-at-mount cases
+	// need state on the context BEFORE the enhancer's own mount-time scans).
+	if (preApply) preApply(ctx);
 	const dispose = bundle.apply(ctx);
 
 	return {
 		dom,
 		win,
 		doc: dom.doc,
+		ctx,
 		locale,
 		scope,
 		slots,
@@ -625,6 +641,7 @@ test("stats block renders with toggles and formats applied", async () => {
 	assert.equal(byLabel.get("Sent"), "120k");
 	assert.equal(byLabel.get("Received"), "5.4k");
 	assert.equal(byLabel.get("Compactions"), "1");
+	assert.equal(byLabel.get("Purges"), "2", "purge rows render right next to compactions");
 	assert.equal(byLabel.get("Context"), "81.2k / 128k · 63.4%");
 	assert.equal(byLabel.get("Subagents"), "2"); // spawned only; running is a live stat, not folded here
 	assert.equal(byLabel.get("Model"), "model-x");
@@ -646,6 +663,7 @@ test("zero counts hide their rows (no fake zeros)", async () => {
 		tokensIn: 0,
 		tokensOut: 0,
 		compactions: 0,
+		purges: 0,
 		subagentsSpawned: 0,
 		toolCalls: 0,
 		lastContext: null,
@@ -669,7 +687,7 @@ test("metrics respect settings toggles applied live", async () => {
 	const env = setup({
 		sessions: store({ s1: { id: "s1", displayTitle: "Fix bug", cwd: "/x", updatedAt: NOW, blank: false } }),
 		stats: statsPayload(),
-		settings: { showTurns: false, showSteps: false, showTokensIn: false, showTokensOut: false, showCacheRead: false, showCompactions: false, showContext: false, showSubagents: false, showModel: false }
+		settings: { showTurns: false, showSteps: false, showTokensIn: false, showTokensOut: false, showCacheRead: false, showCompactions: false, showPurges: false, showContext: false, showSubagents: false, showModel: false }
 	});
 	const card = makeCard(env.dom, { title: "Fix bug", time: "now", statuses: ["Idle"] });
 	attachFiber(card, { id: "s1" });
@@ -1026,6 +1044,94 @@ test("read-only mode renders without crashing", () => {
 	env.dispose();
 });
 
+test("the open card body composes five catalog blocks", () => {
+	// The component's open toggle is a plain `react.useState` — the bundle's
+	// react is the same instance the test drives, so one temporary override
+	// renders the OPEN body and lets the DOM shape be asserted directly.
+	const env = setup({ withSlots: true });
+	const React = requireCjs("react");
+	const realUseState = React.useState;
+	React.useState = function () {
+		return [true, function () {}];
+	};
+	let html;
+	let dict;
+	try {
+		dict = env.locale.registered.find((entry) => entry.ns === "hoverInfo").dict.en;
+		html = renderCard(env).html;
+	} finally {
+		React.useState = realUseState;
+	}
+	const catalogOpen = 'class="dhiCard_catalog"';
+	const firstCatalog = html.indexOf(catalogOpen);
+	const secondCatalog = html.indexOf(catalogOpen, firstCatalog + 1);
+	const thirdCatalog = html.indexOf(catalogOpen, secondCatalog + 1);
+	const fourthCatalog = html.indexOf(catalogOpen, thirdCatalog + 1);
+	const fifthCatalog = html.indexOf(catalogOpen, fourthCatalog + 1);
+	assert.notEqual(firstCatalog, -1, "catalog 1 rendered");
+	assert.notEqual(secondCatalog, -1, "catalog 2 rendered");
+	assert.notEqual(thirdCatalog, -1, "catalog 3 rendered");
+	assert.notEqual(fourthCatalog, -1, "catalog 4 rendered");
+	assert.notEqual(fifthCatalog, -1, "catalog 5 rendered");
+	assert.equal(html.indexOf(catalogOpen, fifthCatalog + 1), -1, "exactly five catalog blocks");
+	// Catalog 1 — the master switch as its two-row field, hint below.
+	assert.ok(html.indexOf(dict.active) > firstCatalog && html.indexOf(dict.active) < secondCatalog, "active title rides catalog 1");
+	assert.ok(html.indexOf(dict.activeHint) > firstCatalog && html.indexOf(dict.activeHint) < secondCatalog, "hint sits as catalog 1's field description");
+	// Catalog 2 — the sidebar-preview tools toggle as its own catalog block,
+	// two-row field shape, hint below.
+	assert.ok(html.indexOf(dict.previewTools) > secondCatalog && html.indexOf(dict.previewTools) < thirdCatalog, "preview-tools title rides catalog 2");
+	assert.ok(html.indexOf(dict.previewToolsHint) > secondCatalog && html.indexOf(dict.previewToolsHint) < thirdCatalog, "hint sits as catalog 2's field description");
+	// Catalog 3 — the composer model-selector toggle as its own catalog block,
+	// two-row field shape, hint below.
+	assert.ok(html.indexOf(dict.modelProvider) > thirdCatalog && html.indexOf(dict.modelProvider) < fourthCatalog, "model-selector title rides catalog 3");
+	assert.ok(html.indexOf("Show the current selection as") > thirdCatalog && html.indexOf("Off leaves the standard tooltip") < fourthCatalog, "hint sits as catalog 3's field description");
+	// Catalog 4 — the background-job kill toggle as its own catalog block,
+	// two-row field shape, hint below.
+	assert.ok(html.indexOf(dict.jobKill) > fourthCatalog && html.indexOf(dict.jobKill) < fifthCatalog, "job-kill title rides catalog 4");
+	assert.ok(html.indexOf("kill button to the running rows") > fourthCatalog && html.indexOf("Off leaves the job list") < fifthCatalog, "hint sits as catalog 4's field description");
+	// Catalog 5 — the metric grid (column-major rows = ceil(13/2)) above the
+	// refresh-interval field, both inside the fifth catalog.
+	assert.ok(html.indexOf('style="grid-template-rows:repeat(7, auto)"') > fifthCatalog, "column-major grid lives in catalog 5");
+	assert.ok(html.indexOf(dict.refresh) > fifthCatalog, "refresh field rides catalog 5");
+	assert.ok(html.indexOf(dict.metricTurns) > fifthCatalog, "metric titles are catalog 5 grid children");
+	env.dispose();
+});
+
+test("the injected card CSS lays the metric toggles out in two columns", () => {
+	const env = setup({ withSlots: true });
+	const style = env.doc.querySelector(
+		'style[data-plugin-css="@comecaramelos/dsh-hover-information/HoverInformationCard.module.css"]'
+	);
+	assert.ok(style !== null, "card stylesheet injected on mount");
+	assert.match(
+		style.textContent,
+		/dhiCard_grid\{grid-template-columns:minmax\(0,1fr\) minmax\(0,1fr\);grid-auto-flow:column/,
+		"two-column, column-major grid rule"
+	);
+	env.dispose();
+});
+
+test("the injected card CSS composes the body as catalog blocks", () => {
+	const env = setup({ withSlots: true });
+	const style = env.doc.querySelector(
+		'style[data-plugin-css="@comecaramelos/dsh-hover-information/HoverInformationCard.module.css"]'
+	);
+	assert.ok(style !== null, "card stylesheet injected on mount");
+	// The reference catalog block: fields stacked inside; the hairline seam is
+	// drawn only BETWEEN consecutive catalogs.
+	assert.match(style.textContent, /\.dhiCard_catalog\{flex-direction:column;align-items:stretch;gap:10px;display:flex\}/, "catalog block rule");
+	assert.match(
+		style.textContent,
+		/\.dhiCard_catalog \+ \.dhiCard_catalog\{border-top:\.5px solid var\(--dsw-alias-border-l2\);padding-top:12px\}/,
+		"catalog-to-catalog seam rule"
+	);
+	// The two-row field: row above, full-width copy below.
+	assert.match(style.textContent, /\.dhiCard_field\{align-items:flex-start;gap:4px;display:flex;flex-direction:column;width:100%\}/, "field rule");
+	assert.match(style.textContent, /\.dhiCard_fieldRow\{align-items:center;gap:8px;display:flex;width:100%\}/, "field row rule");
+	assert.match(style.textContent, /\.dhiCard_fieldDesc\{/, "field description rule");
+	env.dispose();
+});
+
 // ── document-preview enhancer (docs/PLAN.md §19) ────────────────────────────
 
 /** Locate one preview's injected tools bar (the last child of the header). */
@@ -1215,5 +1321,385 @@ test("preview: a loaded-then-ready preview enhances when its path element lands"
 	dom.flush([{ type: "childList", target: preview.header, addedNodes: [pathEl], removedNodes: [] }]);
 
 	assert.ok(previewTools(preview), "the preview re-checked on DOM mutating inside its root");
+	env.dispose();
+});
+
+test("preview: showPreviewTools off injects no header tools", () => {
+	const env = setup({ settings: { showPreviewTools: false } });
+	const preview = makePreview(env.dom);
+	env.doc.body.appendChild(preview.root);
+	fireAttr(env.dom, preview.pathEl);
+	assert.equal(previewTools(preview), undefined, "no tools bar while the preview switch is off");
+	env.dispose();
+});
+
+test("preview: the preview-tools switch applies live both ways", async () => {
+	const env = setup();
+	const preview = makePreview(env.dom);
+	env.doc.body.appendChild(preview.root);
+	fireAttr(env.dom, preview.pathEl);
+	assert.ok(previewTools(preview), "tools injected with the switch at its default");
+
+	// Off: the scope notification re-syncs the open preview and detaches the
+	// bar in the same tick (the diff-only resync keeps the state, so the bar
+	// node survives for the re-enable).
+	await env.scope.set("showPreviewTools", false);
+	assert.equal(previewTools(preview), undefined, "the bar detaches when the switch flips off");
+	preview.header.children.forEach(function (child) {
+		assert.notEqual(child.getAttribute && child.getAttribute("data-hi-tools"), "1", "no injected bar child remains in the header");
+	});
+
+	// On: the same open preview re-seats its existing bar, no reload.
+	await env.scope.set("showPreviewTools", true);
+	const bar = previewTools(preview);
+	assert.ok(bar, "the bar re-seats when the switch flips back on");
+	assert.equal(preview.header.children[preview.header.children.length - 1], bar, "the bar ends the toolbar row again");
+	env.dispose();
+});
+
+// ── composer model selector (docs/PLAN.md §33) ──────────────────────────────
+
+test("model selector: a composer open at mount is caught without records", () => {
+	const dom = createDom();
+	const seat = makeModelSeat(dom);
+	const env = setup({ dom });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini", "the mount-time resync catches the already-mounted composer");
+	env.dispose();
+});
+
+test("model selector: the seat trigger tooltip carries `provider > model`", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom);
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini", "the trigger carries the provider-prefixed label");
+	env.dispose();
+});
+
+test("model selector: the open menu's root cells carry the same title", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini");
+	for (const cell of seat.cells) {
+		assert.equal(cell.getAttribute("title"), "OpenRouter > GPT-4o mini", "the root cells carry the pair too");
+	}
+	env.dispose();
+});
+
+test("model selector: the visible cellValue shows `provider > model`, leaving the Effort row alone", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	// The Model row's stock value is the bare model name — that is where the
+	// provider belongs.
+	assert.equal(seat.cellValues[0].textContent, "OpenRouter > GPT-4o mini", "the Model row shows the provider-prefixed pair");
+	// The Effort row's value is not the model name, so its stock value is
+	// left untouched (fail-open on the shape, never a forced overwrite).
+	assert.equal(seat.cellValues[1].textContent, "Medium", "the Effort row keeps its own value");
+	env.dispose();
+	assert.equal(seat.cellValues[0].textContent, "GPT-4o mini", "dispose hands the Model row back to the shell");
+	assert.equal(seat.cellValues[1].textContent, "Medium", "the Effort row was never owned");
+});
+
+test("model selector: a live selection change rewrites the visible value", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.cellValues[0].textContent, "OpenRouter > GPT-4o mini");
+	// Live switch: the store subscription resyncs, and React's own render
+	// drops the new bare model name into the span — that DOM mutation is what
+	// makes us recapture the stock value before re-pairing.
+	// Live switch: the store subscription resyncs, and React's own render
+	// drops the new bare model name into the span — that DOM mutation is what
+	// makes us recapture the stock value before re-pairing.
+	seat.store.set({
+		current: { provider: "anthropic", model: "claude-sonnet-4" },
+		groups: [{ id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-4", name: "Claude Sonnet 4" }] }]
+	});
+	seat.cellValues[0].textContent = "Claude Sonnet 4";
+	env.dom.flush([{ type: "characterData", target: seat.cellValues[0] }]);
+	assert.equal(seat.cellValues[0].textContent, "Anthropic > Claude Sonnet 4", "the visible pair rides the live selection");
+	// A switch off restores the shell's *current* model name (recaptured from
+	// React's render), not the one captured when the menu first mounted.
+	return env.scope.set("showModelProvider", false).then(() => {
+		assert.equal(seat.cellValues[0].textContent, "Claude Sonnet 4", "off restores the shell's current model name");
+	});
+});
+
+test("model selector: live-shaped fiber chains resolve the menu cells through the composer source", () => {
+	// The live React shape: the seat/trigger fibers reach `directory` up the
+	// `.return` chain, while a portal menu cell's own chain reaches nothing —
+	// the live failure. The composer (seat) source is the fallback that makes
+	// the root-pane cells carry the title with no DOM source (list never
+	// opened) either.
+	const dom = createDom();
+	const seat = makeModelSeat(dom, { chain: true, withMenu: true, openList: false });
+	const env = setup({ dom });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini", "the trigger resolves through its fiber return-chain");
+	for (const cell of seat.cells) {
+		assert.equal(cell.getAttribute("title"), "OpenRouter > GPT-4o mini", "the cells resolve through the composer fallback");
+	}
+
+	// The same fallback keeps a live switch reaching the cells without any
+	// DOM record: the seat's subscription drives the resync.
+	seat.store.set({
+		current: { provider: "anthropic", model: "claude-sonnet-4" },
+		groups: [{ id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-4", name: "Claude Sonnet 4" }] }]
+	});
+	assert.equal(seat.cells[0].getAttribute("title"), "Anthropic > Claude Sonnet 4", "the fallback rides the live selection, not a stale capture");
+	env.dispose();
+	assert.equal(seat.cells[0].getAttribute("title"), null, "dispose restores the cell's stock absence of title");
+});
+
+test("model selector: without the fiber store, the open model list is the source", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withFiber: false, withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "the DOM source is the checked option, not the trigger — it keeps the stock label");
+	for (const cell of seat.cells) {
+		assert.equal(cell.getAttribute("title"), "OpenRouter > GPT-4o mini", "the cells resolve through the checked option");
+	}
+	env.dispose();
+});
+
+test("model selector: nothing resolvable leaves the stock DOM untouched", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withFiber: false });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "fail-open: no selection source → no DOM touch");
+	env.dispose();
+});
+
+test("model selector: the switch off leaves the stock selector untouched", () => {
+	const env = setup({ settings: { showModelProvider: false } });
+	const seat = makeModelSeat(env.dom, { withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "no write while off");
+	assert.equal(seat.cells[0].getAttribute("title"), null, "no cell titles while off");
+	env.dispose();
+});
+
+test("model selector: flipping the switch off restores; flipping back re-seats", async () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini");
+	await env.scope.set("showModelProvider", false);
+	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "off restores the stock trigger tooltip");
+	assert.equal(seat.cells[0].getAttribute("title"), null, "off removes the injected cell titles");
+	await env.scope.set("showModelProvider", true);
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini", "back on re-seats every title");
+	assert.equal(seat.cells[0].getAttribute("title"), "OpenRouter > GPT-4o mini", "and re-seats the cells");
+	env.dispose();
+});
+
+test("model selector: master off restores the stock selector everywhere", async () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom);
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini");
+	await env.scope.set("active", false);
+	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "master off restores the stock tooltip");
+	env.dispose();
+});
+
+test("model selector: a selection change rides the store subscription, without DOM records", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini");
+	seat.store.set({
+		current: { provider: "anthropic", model: "claude-sonnet-4" },
+		groups: [{ id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-4", name: "Claude Sonnet 4" }] }]
+	});
+	assert.equal(seat.trigger.getAttribute("title"), "Anthropic > Claude Sonnet 4", "the switch rides the store, not a DOM attribute");
+	assert.equal(seat.cells[0].getAttribute("title"), "Anthropic > Claude Sonnet 4", "and reaches the cells");
+	env.dispose();
+});
+
+test("model selector: dispose hands every managed title back to the shell", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withMenu: true });
+	fire(env.dom, { added: [seat.seat] });
+	env.dispose();
+	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "dispose restores the stock trigger tooltip");
+	assert.equal(seat.cells[0].getAttribute("title"), null, "dispose removes the injected cell titles");
+});
+
+// ---------------------------------------------------------------------------
+// Background-job kill buttons (docs/PLAN.md §34)
+// ---------------------------------------------------------------------------
+
+/** The shell registers the `job` dictionaries; the menu label is one of them. */
+function addJobLocale(ctx) {
+	ctx.locale.registered.push({ ns: "job", dict: { en: { "list.aria": "Background jobs" } } });
+	return () => {};
+}
+
+/** The kill buttons of one menu (row order = DOM row order). */
+function killButtons(ul) {
+	return ul.children.filter((li) => li.querySelector("[data-hi-jobkill]"));
+}
+function buttonOf(li) {
+	return li.querySelector("[data-hi-jobkill]");
+}
+
+/** The live store face for one menu: two live rows, one settled. */
+const JOB_ROWS = [
+	{ id: "job-1", status: "running" },
+	{ id: "job-2", status: "stopping" },
+	{ id: "job-3", status: "completed" }
+];
+
+function jobDom(dom) {
+	const menu = makeJobMenu(dom, {
+		sessionId: "s1",
+		rows: JOB_ROWS.map((row) => ({ id: row.id, status: row.status, live: row.status === "running" || row.status === "stopping" }))
+	});
+	dom.doc.body.appendChild(menu.root);
+	return menu;
+}
+
+test("live background-job rows grow kill buttons; settled rows stay stock", () => {
+	const dom = createDom();
+	const menu = jobDom(dom);
+	const env = setup({
+		dom,
+		sessions: store({ s1: { id: "s1", title: "Alpha" } }, { s1: JOB_ROWS }),
+		preApply: addJobLocale
+	});
+
+	const rows = killButtons(menu.ul);
+	assert.equal(rows.length, 2, "one button per live row only");
+	assert.equal(buttonOf(rows[0]).getAttribute("data-hi-job"), "job-1");
+	assert.equal(buttonOf(rows[1]).getAttribute("data-hi-job"), "job-2");
+	assert.equal(buttonOf(menu.ul.children[2]), null, "the settled row carries nothing");
+	for (const row of rows) {
+		const button = buttonOf(row);
+		assert.equal(button.className, "dhi-kill");
+		assert.equal(button.getAttribute("aria-label"), "Kill background job");
+	}
+	env.dispose();
+});
+
+test("the kill button addresses the host once per click with {sessionId, jobId}", async () => {
+	const dom = createDom();
+	const menu = jobDom(dom);
+	const env = setup({
+		dom,
+		sessions: store({ s1: { id: "s1", title: "Alpha" } }, { s1: JOB_ROWS }),
+		stats: { outcome: "requested" },
+		preApply: addJobLocale
+	});
+	const button = buttonOf(killButtons(menu.ul)[0]);
+	button.dispatchEvent(new dom.DomEvent("click", button));
+	await tick();
+	const call = env.rpcCalls.find((entry) => entry.endpoint === "hoverInfo/killJob");
+	assert.ok(call !== void 0, "the kill rides hoverInfo/killJob");
+	assert.deepEqual(call.payload, { args: { sessionId: "s1", jobId: "job-1" } });
+	env.dispose();
+});
+
+test("a second click while a kill request is in flight sends nothing extra", async () => {
+	const dom = createDom();
+	const menu = jobDom(dom);
+	let resolveKill = null;
+	const env = setup({
+		dom,
+		sessions: store({ s1: { id: "s1", title: "Alpha" } }, { s1: JOB_ROWS }),
+		preApply: addJobLocale
+	});
+	// Make the kill RPC answer manually so the second click lands while pending.
+	env.rpcCalls.length = 0;
+	const pending = new Promise((resolve) => {
+		resolveKill = resolve;
+	});
+	env.ctx.get("connection").rpc.call = (_channel, endpoint, payload) => {
+		env.rpcCalls.push({ endpoint, payload });
+		return pending;
+	};
+	const button = buttonOf(killButtons(menu.ul)[0]);
+	button.dispatchEvent(new dom.DomEvent("click", button));
+	button.dispatchEvent(new dom.DomEvent("click", button));
+	await tick();
+	assert.equal(env.rpcCalls.filter((entry) => entry.endpoint === "hoverInfo/killJob").length, 1, "one request per pending kill");
+	resolveKill({ ok: true, value: { outcome: "requested" } });
+	await tick();
+	env.dispose();
+});
+
+test("settling a job drops its kill button on the next sync", async () => {
+	const dom = createDom();
+	const menu = jobDom(dom);
+	let snapshot = { ids: ["s1"], byId: { s1: { id: "s1" } }, jobsBySession: { s1: JOB_ROWS } };
+	const sessions = { list: { getSnapshot: () => snapshot, subscribe: () => () => {} } };
+	const env = setup({ dom, sessions, preApply: addJobLocale });
+	assert.equal(killButtons(menu.ul).length, 2);
+	snapshot = {
+		ids: ["s1"],
+		byId: { s1: { id: "s1" } },
+		jobsBySession: { s1: [{ id: "job-1", status: "completed" }, { id: "job-2", status: "killed" }, { id: "job-3", status: "completed" }] }
+	};
+	sessions.list.set ? sessions.list.set(snapshot) : void 0;
+	// The shell's own churn would fire the per-menu observer; one sweep tick
+	// stands in for it.
+	for (const fn of env.sweepCallbacks) fn();
+	assert.equal(killButtons(menu.ul).length, 0, "settled rows carry no buttons");
+	env.dispose();
+});
+
+test("the kill switch off detaches every live-row button live", async () => {
+	const dom = createDom();
+	const menu = jobDom(dom);
+	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
+	assert.equal(killButtons(menu.ul).length, 2);
+	env.scope.set("showJobKill", false);
+	await tick();
+	assert.equal(killButtons(menu.ul).length, 0, "off strips the live menu");
+	env.scope.set("showJobKill", true);
+	await tick();
+	assert.equal(killButtons(menu.ul).length, 2, "on re-seats the buttons");
+	env.dispose();
+});
+
+test("the master off leaves the stock job list everywhere", async () => {
+	const dom = createDom();
+	const menu = jobDom(dom);
+	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
+	env.scope.set("active", false);
+	await tick();
+	assert.equal(killButtons(menu.ul).length, 0);
+	env.dispose();
+});
+
+test("an unresolved menu identity leaves every row stock (fail-open)", () => {
+	const dom = createDom();
+	// No store rows for the session: the live vs settled question cannot be
+	// answered, so no row gets a button.
+	const menu = makeJobMenu(dom, { sessionId: "gone", rows: [{ id: "job-1", status: "running" }] });
+	dom.doc.body.appendChild(menu.root);
+	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
+	assert.equal(killButtons(menu.ul).length, 0);
+	env.dispose();
+});
+
+test("an unanchored ul (wrong aria-label) never registers", () => {
+	const dom = createDom();
+	const menu = makeJobMenu(dom, { sessionId: "s1", ariaLabel: "Something else", rows: [{ id: "job-1", status: "running" }] });
+	dom.doc.body.appendChild(menu.root);
+	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
+	assert.equal(killButtons(menu.ul).length, 0, "the menu is anchored by its localized label");
+	env.dispose();
+});
+
+test("a menu that disappears is forgotten (no leaked observers)", () => {
+	const dom = createDom();
+	const menu = jobDom(dom);
+	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
+	menu.ul.parentElement.parentElement.remove(); // open menu closed
+	fire(dom, { removed: [menu.ul] });
+	for (const fn of env.sweepCallbacks) fn();
+	// A sweep with nothing connected stops the heartbeat without leaking.
+	assert.equal(env.intervals.cleared + (env.intervals.created - env.intervals.cleared), env.intervals.created);
 	env.dispose();
 });

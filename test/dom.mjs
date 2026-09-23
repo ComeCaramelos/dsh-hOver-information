@@ -228,9 +228,25 @@ export function attachFiber(element, node) {
 /**
  * Attach a fake React fiber carrying arbitrary memoized props — stands in
  * for the document-preview renderer's `content` prop (source text + eof).
+ * `returnChain` is an optional array of ancestor fibers (hop-1, hop-2, …) that
+ * the fiber's `.return` chain walks through — stands in for a real React tree
+ * where `memoizedProps` (hop 0) is just the DOM props and the prop that
+ * resolves identity lives on an ancestor component fiber.
+ * `fiberKey` stands in for the element's React `key` (the background-job
+ * menu keys its rows by job id — the fiber itself carries it).
  */
-export function attachPropsFiber(element, props) {
-	element["__reactFiber$test" + ++keyCounter] = { memoizedProps: props, child: null, sibling: null };
+export function attachPropsFiber(element, props, returnChain, fiberKey) {
+	const fiber = { memoizedProps: props, child: null, sibling: null };
+	if (fiberKey !== void 0) fiber.key = String(fiberKey);
+	if (Array.isArray(returnChain) && returnChain.length > 0) {
+		let tail = fiber;
+		for (let i = 0; i < returnChain.length; i++) {
+			const next = { memoizedProps: returnChain[i].memoizedProps, child: null, sibling: null };
+			tail.return = next;
+			tail = next;
+		}
+	}
+	element["__reactFiber$test" + ++keyCounter] = fiber;
 }
 
 export function createDom() {
@@ -400,4 +416,168 @@ export function makePreview(dom, { path = "/home/u/proj/AGENTS.md", title = "Mar
 	body.setAttribute("data-textpreview-body", "true");
 	root.appendChild(body);
 	return { root, header, pathEl, body, reload };
+}
+
+/**
+ * The composer's stock model selector (docs/PLAN.md §33): the named seat
+ * anchor (`div[data-slot="conversation.input.model"]`) with the
+ * `button[class$="_trigger"]` inside it, whose `title` is the shell-composed
+ * `model · effort`.
+ *
+ * - `withFiber` (default) stands the `ModelSelect` component fiber in on both
+ *   the anchor and the trigger — its `directory` store answers
+ *   `getSnapshot()` with `{ current: {provider, model}, groups }` and lets a
+ *   test flip the selection through `store.set(next)`;
+ * - `chain` (with `withFiber`) stands the fiber in the way the live React
+ *   tree does: hop 0 carries only DOM props and `directory` lives on a
+ *   component fiber up the `.return` chain — and the menu-cell fibers' return
+ *   chains reach nothing carrying `directory` (the portal's real shape is
+ * *why* the menu cells used to resolve only off the DOM source). This is the
+ *   shape that reproduces the live bug; the fiber source on the seat's return
+ *   chain still answers for the trigger.
+ * - `withMenu` appends the body-portal root menu: the two
+ *   `button[class$="_cell"][role="menuitem"]` cells; `openList` (default true)
+ *   also mounts the model-list section with the checked option — the DOM
+ *   source's only DOM-visible signal — while `openList: false` stands the
+ *   common closed-list (root-pane) state with no DOM source at all.
+ */
+export function makeModelSeat(dom, { provider = "openrouter", model = "gpt-4o-mini", providerName = "OpenRouter", modelName = "GPT-4o mini", effort = "Medium", withFiber = true, chain = false, withMenu = false, openList = true } = {}) {
+	const doc = dom.doc;
+	const seat = dom.createElement("div");
+	seat.setAttribute("data-slot", "conversation.input.model");
+	const trigger = dom.createElement("button");
+	trigger.className = "_7KE1Ra_trigger";
+	trigger.setAttribute("title", modelName + " · " + effort);
+	seat.appendChild(trigger);
+	doc.body.appendChild(seat);
+	let store = null;
+	if (withFiber) {
+		store = {
+			subscribers: [],
+			value: { current: { provider: provider, model: model }, groups: [{ id: provider, name: providerName, models: [{ id: model, name: modelName }] }] },
+			getSnapshot() {
+				return this.value;
+			},
+			subscribe(listener) {
+				this.subscribers.push(listener);
+				return () => {
+					this.subscribers = this.subscribers.filter((fn) => fn !== listener);
+				};
+			},
+			set(next) {
+				this.value = next;
+				for (const listener of this.subscribers) listener();
+			}
+		};
+		if (chain) {
+			// Live React shape: hop 0 is DOM props; `directory` lives on a
+			// component fiber up the `.return` chain. Both the seat and the
+			// trigger reach the store through the chain (so the fiber source
+			// answers for them), exactly as a live composer does.
+			attachPropsFiber(seat, { "data-slot": "conversation.input.model" }, [{ memoizedProps: {} }, { memoizedProps: { directory: store } }]);
+			attachPropsFiber(trigger, { className: "_7KE1Ra_trigger", title: modelName + " · " + effort }, [{ memoizedProps: {} }, { memoizedProps: { directory: store } }]);
+		} else {
+			attachPropsFiber(seat, { directory: store });
+			attachPropsFiber(trigger, { directory: store });
+		}
+	}
+	const out = { seat: seat, trigger: trigger, store: store, menu: null, cells: [], cellValues: [], option: null };
+	if (withMenu) {
+		const menu = dom.createElement("div");
+		menu.className = "_7KE1Ra_menu";
+		menu.setAttribute("role", "menu");
+		for (const label of ["Model", "Effort"]) {
+			const cell = dom.createElement("button");
+			cell.className = "_7KE1Ra_cell";
+			cell.setAttribute("role", "menuitem");
+			// Stock shape: a row label + the shell's `cellValue` span carrying
+			// the bare model name (the provider is never rendered here).
+			const labelEl = dom.createElement("span");
+			labelEl.className = "_7KE1Ra_cellLabel";
+			labelEl.textContent = label;
+			cell.appendChild(labelEl);
+			const valueEl = dom.createElement("span");
+			valueEl.className = "_7KE1Ra_cellValue";
+			valueEl.textContent = label === "Model" ? modelName : "Medium";
+			cell.appendChild(valueEl);
+			menu.appendChild(cell);
+			out.cells.push(cell);
+			out.cellValues.push(valueEl);
+		}
+		if (openList) {
+			// The model-list pane open (the DOM source's only DOM-visible
+			// signal): the checked option inside its provider-grouped section.
+			const section = dom.createElement("section");
+			section.setAttribute("role", "group");
+			const groupTitle = dom.createElement("div");
+			groupTitle.className = "_7KE1Ra_groupTitle";
+			groupTitle.textContent = providerName;
+			section.appendChild(groupTitle);
+			const option = dom.createElement("button");
+			option.className = "_7KE1Ra_option";
+			option.setAttribute("role", "menuitemradio");
+			option.setAttribute("aria-checked", "true");
+			const nameEl = dom.createElement("span");
+			nameEl.className = "_7KE1Ra_modelName";
+			nameEl.textContent = modelName;
+			option.appendChild(nameEl);
+			section.appendChild(option);
+			menu.appendChild(section);
+			out.option = option;
+		}
+		doc.body.appendChild(menu);
+		if (store !== null) {
+			if (chain) {
+				// Live reality: a portal cell's own fiber return-chain does NOT
+				// carry the `directory` props (the live bug this reproduces) —
+				// the fiber source on a cell must miss, and resolution rides
+				// the composer (seat) source instead.
+				for (const cell of out.cells) attachPropsFiber(cell, { className: "_7KE1Ra_cell", role: "menuitem" }, [{ memoizedProps: {} }]);
+			} else {
+				for (const cell of out.cells) attachPropsFiber(cell, { directory: store });
+			}
+		}
+		out.menu = menu;
+	}
+	return out;
+}
+
+/**
+ * A stock-shaped `JobListAction` menu: `div > ul[aria-label] > li` rows
+ * shaped like the shell renders them (state dot + kind chip + label +
+ * status + duration). Each row's fiber carries the React key the shell
+ * gives rows (the background-job id), and `sessionId` rides an ancestor
+ * fiber — the fast-path every identity resolution uses.
+ *
+ * Rows without their own `id` omit the fiber key (the shell's keys are
+ * only an optimization there too).
+ */
+export function makeJobMenu(dom, { rows = [], sessionId = undefined, ariaLabel = "Background jobs" } = {}) {
+	const doc = dom.doc;
+	const root = dom.createElement("div");
+	root.className = "_job_menuRoot";
+	const ul = dom.createElement("ul");
+	ul.setAttribute("aria-label", ariaLabel);
+	root.appendChild(ul);
+	for (const row of rows) {
+		const li = dom.createElement("li");
+		li.className = "_job_row" + (row.live === false ? " _job_rowSettled" : "");
+		const dot = dom.createElement("span");
+		dot.setAttribute("data-state", row.live === false ? "done" : row.status === "stopping" ? "warning" : "ongoing");
+		dot.style.width = "10px";
+		dot.style.height = "10px";
+		const kind = dom.createElement("span");
+		kind.textContent = "bash";
+		const label = dom.createElement("span");
+		label.textContent = row.label ?? "exec sleep 10";
+		const status = dom.createElement("span");
+		status.textContent = row.live === false ? "completed" : row.status === "stopping" ? "stopping" : "running";
+		const duration = dom.createElement("span");
+		duration.textContent = "1m 40s";
+		for (const span of [dot, kind, label, status, duration]) li.appendChild(span);
+		if (row.id !== undefined && row.id !== null) attachPropsFiber(li, { className: li.className }, undefined, row.id);
+		ul.appendChild(li);
+	}
+	if (sessionId !== undefined) attachPropsFiber(ul, { className: "_job_menu" }, [{ memoizedProps: {} }, { memoizedProps: { sessionId } }]);
+	return { root, ul };
 }

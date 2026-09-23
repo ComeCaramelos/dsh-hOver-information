@@ -5,8 +5,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { apply, Config, inject, name, SETTINGS_NAMESPACE } from "../lib/index.js";
-import { hoverInfoProjectionDefinition } from "../lib/unit.js";
+import { apply, Config, hoverInfoProjectionDefinition, inject, name, SETTINGS_NAMESPACE } from "../lib/index.js";
 
 test("plugin identity", () => {
 	assert.equal(name, "hover-info");
@@ -18,12 +17,16 @@ test("base schema defaults are complete and match docs/PLAN.md §4", () => {
 	const value = Config["~standard"].validate({}).value;
 	assert.deepEqual(value, {
 		active: true,
+		showPreviewTools: true,
+		showModelProvider: true,
+		showJobKill: true,
 		refreshMs: 30000,
 		showTurns: true,
 		showSteps: true,
 		showTokensIn: true,
 		showTokensOut: true,
 		showCompactions: true,
+		showPurges: true,
 		showContext: true,
 		showSubagents: true,
 		showModel: true,
@@ -82,7 +85,7 @@ test("apply installs the section, registers the projection, mounts the remote", 
 	mounted.installed.hooks.onChange();
 
 	assert.equal(mounted.registered.key, "hoverInfo");
-	assert.equal(mounted.registered.stateVersion, 1);
+	assert.equal(mounted.registered.stateVersion, 2, "v2 folds `compaction/prune`; the bump forces already-checkpointed sessions to refold the full log");
 	assert.equal(typeof mounted.registered.init, "function");
 	assert.equal(typeof mounted.registered.apply, "function");
 	assert.equal(typeof mounted.registered.wire.view, "function");

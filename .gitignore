@@ -5,8 +5,14 @@ _reference/
 # Dependencies
 node_modules/
 
+# npm cache (workspace-local)
+.npm-cache/
+
 # Build / dist
 dist/
+
+# Build output (generated from src/*.ts by `npm run build`; never hand-edit)
+lib/
 
 # Docs
 docs/

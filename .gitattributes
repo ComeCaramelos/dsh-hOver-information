@@ -1,0 +1,7 @@
+# Normalize line endings repository-wide: `.editorconfig` pins LF everywhere,
+# and a CRLF checkout here shows up as a whole-file diff in `git status`.
+* text=auto eol=lf
+.githooks/* text eol=lf
+*.png binary
+*.ico binary
+*.svg text eol=lf

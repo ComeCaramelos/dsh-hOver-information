@@ -6,7 +6,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { hoverInfoProjectionDefinition } from "../lib/unit.js";
+import { hoverInfoProjectionDefinition } from "../lib/index.js";
 
 function fold(events, header = { createdAt: 1000 }) {
 	const def = hoverInfoProjectionDefinition();
@@ -51,6 +51,7 @@ test("clean multi-turn log folds every metric", () => {
 		{ type: "turn/start", seq: 12, time: 1200, data: { turn: 2 } },
 		{ type: "step/start", seq: 13, time: 1201, data: { turn: 2, step: 1 } },
 		{ type: "compaction/end", seq: 14, time: 1210, data: { compactionId: "comp-1", turn: 2 } },
+		{ type: "compaction/prune", seq: 140, time: 1212, data: { shadowedRange: { start: 4, end: 4 }, shadowedSeqs: [4], shadowedTokenCount: 1200 } },
 		{ type: "subagent/catalog", seq: 15, time: 1215, data: { version: 0, childId: "child-a", mode: "one-shot" } },
 		{ type: "subagent/catalog", seq: 16, time: 1216, data: { version: 0, childId: "child-b", mode: "continuable" } },
 		{
@@ -77,6 +78,7 @@ test("clean multi-turn log folds every metric", () => {
 	assert.equal(view.cacheRead, 20000, "absent cache fields add zero");
 	assert.equal(view.cacheWrite, 5);
 	assert.equal(view.compactions, 1);
+	assert.equal(view.purges, 1, "one compaction/prune durable event = one purge");
 	assert.equal(view.subagentsSpawned, 2);
 	assert.equal(view.toolCalls, 1);
 	assert.equal(view.llmMs, (1051 - 1021) + (1121 - 1091) + (1251 - 1201));
@@ -84,6 +86,16 @@ test("clean multi-turn log folds every metric", () => {
 	assert.deepEqual(view.lastContext, { tokens: 500, at: 1251 });
 	assert.deepEqual(view.lastRequest, { provider: "acme", model: "model-x", contextWindow: 128000, at: 1010 });
 	assert.equal(view.createdAt, 1000);
+});
+
+test("compaction/prune folds as purges independent of compactions", () => {
+	const events = [
+		{ type: "compaction/prune", time: 11, data: { shadowedSeqs: [3], shadowedTokenCount: 900 } },
+		{ type: "compaction/prune", time: 12, data: { shadowedSeqs: [5], shadowedTokenCount: 400 } }
+	];
+	const { view } = fold(events);
+	assert.equal(view.purges, 2);
+	assert.equal(view.compactions, 0);
 });
 
 test("repeated step/end inside one turn counts steps but one turn", () => {
