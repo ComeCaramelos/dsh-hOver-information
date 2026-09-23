@@ -3,7 +3,17 @@
 DSH plugin. Fixed names (renaming breaks cache/namespace): plugin id
 `hover-info`; settings namespace `hover-info`; locale namespace `hoverInfo`;
 bundle id `@comecaramelos/dsh-hover-information` (npm identity per
-`~/.dsh/AGENTS.md` — never publish, local `file:` + symlink only).
+`~/.dsh/AGENTS.md` — published to npm; live profiles install it from npm).
+
+**Profile exception (permanent).** The `plugin-dev` profile
+(`~/.dsh/profiles/plugin-dev`) is the ONLY profile/preset that keeps the local
+reference: `link:/home/roberto/dev/dsh/dsh-hover-information` + symlink under
+its `node_modules/@comecaramelos/`, for source-level development. Every other
+profile (live `web`, `headless`, future presets) installs the published npm
+package. When cleaning local references for npm installs elsewhere, leave the
+`plugin-dev` reference and symlink untouched. See
+`~/.dsh/profiles/plugin-dev/README.md` + `AGENTS.md` (profile guidance loaded
+for sessions on that profile).
 
 The full design lives in `docs/PLAN.md` and the final contract in
 `docs/SPEC.md`. Keep PLAN coherent; if an implementation revises a plan
@@ -121,18 +131,20 @@ through its `data-document-preview` / `data-textpreview-path` attributes.
 ## Deploy / verify
 
 - **Runtime imports live in `dependencies`, never peer/devDeps** (PLAN §15
-  packaging deviation). The live profile installs pnpm over `file:` deps,
-  which only materializes `dependencies`; `lib/index.js → lib/remote.js`
-  importing `@deepseek-ai/dsh-typert-protocol` from a peer/devDeps-only
-  declaration throws `ERR_MODULE_NOT_FOUND` while loading the bundle and
-  `dsh web` never starts. Everything the host half imports (`zod`,
-  `schemastery`, `dsh-typert-protocol`, `cordis`) belongs in `dependencies`;
-  only `react`/`react-dom` (browser bundle + tests) stay in devDeps.
-- Live profile (`~/.dsh/profiles/web`) is a pnpm tree on a Windows mount:
-  never `npm`/`pnpm install` inside it — `file:` dependency +
-  `dsh.profile.bundles` entry + symlink under `node_modules/@comecaramelos/`
-  (recipe below). Never restart the running `dsh web`; the user
-  restarts the GUI after deploy.
+  packaging deviation). The live profile installs the published npm package
+  (pnpm), which only materializes `dependencies`; `lib/index.js →
+  lib/remote.js` importing `@deepseek-ai/dsh-typert-protocol` from a
+  peer/devDeps-only declaration throws `ERR_MODULE_NOT_FOUND` while loading
+  the bundle and `dsh web` never starts. Everything the host half imports
+  (`zod`, `schemastery`, `dsh-typert-protocol`, `cordis`) belongs in
+  `dependencies`; only `react`/`react-dom` (browser bundle + tests) stay in
+  devDeps.
+- Live profile (`~/.dsh/profiles/web`) is a pnpm tree: it consumes the
+  published npm package — `"@comecaramelos/dsh-hover-information": "^x.y.z"`
+  in `dependencies` + a `dsh.profile.bundles` entry; no `file:` dep, no
+  symlink there (recipe below). Only the `plugin-dev` profile keeps the local
+  `link:` reference (see the profile exception at the top). Never restart the
+  running `dsh web`; the user restarts the GUI after deploy.
 - Isolated checks: `npm test`, plus the `DSH_HOME` fixture boot below
   (`--dump-config | grep -A5 hover-info`, `--port 0` boot).
 
@@ -161,25 +173,32 @@ npm test          # node --test: DOM-stub enhancer + host wiring, all fakes
 - Host behavior beyond the fakes is exercised by the isolated boot + RPC smoke
   below, then by the GUI checklist.
 
-### Deploy recipe (live web profile — WSL)
+### Deploy recipe (live web profile)
 
-The live profile is a **pnpm tree on a Windows mount**, so deploy never runs a
-package manager inside it:
+The live profile consumes the published npm package — the deploy is just the
+manifest entry, materialized by pnpm:
 
-1. Edit `~/.dsh/profiles/web/package.json`: add
-   `"@comecaramelos/dsh-hover-information": "file:<repo path>"` to
-   `dependencies` and the same specifier to the `dsh.profile.bundles` list,
-   after `@deepseek-ai/dsh-base` / `@deepseek-ai/dsh-web-app`.
-2. Symlink the repo into the tree:
-   `ln -s <repo> ~/.dsh/profiles/web/node_modules/@comecaramelos/dsh-hover-information`.
+1. `~/.dsh/profiles/web/package.json`: dependency
+   `"@comecaramelos/dsh-hover-information": "^x.y.z"` (published version)
+   **plus** the same name in `dsh.profile.bundles`, after
+   `@deepseek-ai/dsh-base` / `@deepseek-ai/dsh-web-app`. No `file:` dep, no
+   symlink under `node_modules/@comecaramelos/` — a leftover symlink there
+   shadows the installed tree and re-introduces the source checkout.
+2. Install inside the profile (`pnpm install`, run by the user) — it lands the
+   tarball in `node_modules`, a snapshot in `pnpm-lock.yaml`, and a
+   `.modules.yaml` entry; verify all three after.
 3. Ask the user to restart/refresh the GUI — client bundles do not hot-update
    in the live profile, and the agent must not restart `dsh web`.
 
 The browser client injects the live services it reads
 (`@deepseek-ai/dsh-api-session-controller`,
-`@deepseek-ai/dsh-client-connection`, `@deepseek-ai/dsh-client-locale`,
-`@deepseek-ai/dsh-client-ui-settings`) — all already mounted by the base
-profile, so deploy stays `file:` + bundle entry + symlink.
+`@deepseek-ai/dsh-client-connection`,
+`@deepseek-ai/dsh-client-locale`, `@deepseek-ai/dsh-client-ui-settings`) —
+all already mounted by the base profile, so deploy stays manifest-only.
+
+For source-level iteration use the `plugin-dev` profile (its `link:` +
+symlink is the permanent local-reference exception, see the profile note at
+the top); never copy that local reference back into the live profile.
 
 ### Isolated boot check (no live profile involved)
 

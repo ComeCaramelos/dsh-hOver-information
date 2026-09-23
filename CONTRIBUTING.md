@@ -5,13 +5,6 @@ codebase, see [`AGENTS.md`](AGENTS.md).
 
 ## Local development
 
-The plugin's internal contract, the projection/remote wiring and the testing
-and deployment recipes live in [`AGENTS.md`](AGENTS.md); the design rationale
-stays in [`docs/PLAN.md`](docs/PLAN.md) and the final contract in
-[`docs/SPEC.md`](docs/SPEC.md).
-
-### Testing
-
 ```sh
 npm install
 npm test
