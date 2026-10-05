@@ -5,18 +5,16 @@ codebase, see [`AGENTS.md`](AGENTS.md).
 
 ## Local development
 
-The plugin's internal contract, the projection/remote wiring and the testing
-and deployment recipes live in [`AGENTS.md`](AGENTS.md); the design rationale
-stays in [`docs/PLAN.md`](docs/PLAN.md) and the final contract in
-[`docs/SPEC.md`](docs/SPEC.md).
-
-### Testing
-
 ```sh
 npm install
+npm run build
 npm test
 ```
 
+- Sources live in `src/*.ts`; `lib/` is the generated tree (`tsc` for the host
+  half + `tsc -p tsconfig.client.json` for the browser bundle) and is
+  gitignored. `npm test` builds first, because the tests drive the built
+  `lib/*.js`.
 - Tests are plain `node:assert` scripts (`node test/<name>.test.mjs`), run through `npm test`.
 - End-to-end host behavior is exercised by the `.smoke/` overlays — see *Testing conventions* in [`AGENTS.md`](AGENTS.md).
 
