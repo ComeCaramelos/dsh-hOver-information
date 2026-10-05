@@ -1,7 +1,7 @@
 {
   "name": "@comecaramelos/dsh-hover-information",
   "description": "DSH plugin: richer session hover cards — corner icons that copy the session id and workspace path, a configurable metrics block (turns, steps, tokens, compactions, context, subagents, …) fed by the hoverInfo projection + Typert remote, all gated by a Settings → Plugins card",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "author": "Robe ComeCaramelos <hello@comecaramelos.com>",
   "repository": {
     "type": "git",
