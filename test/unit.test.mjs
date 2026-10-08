@@ -73,7 +73,7 @@ test("clean multi-turn log folds every metric", () => {
 	const { view } = fold(events);
 	assert.equal(view.turns, 2, "turn counted once per distinct turn/end group");
 	assert.equal(view.steps, 3);
-	assert.equal(view.tokensIn, 81200 + 82000 + 500);
+	assert.equal(view.tokensIn, (81200 + 20000 + 5) + 82000 + 500, "tokens sent is the whole prompt of every request, cache buckets included");
 	assert.equal(view.tokensOut, 300 + 100 + 50);
 	assert.equal(view.cacheRead, 20000, "absent cache fields add zero");
 	assert.equal(view.cacheWrite, 5);
@@ -86,6 +86,29 @@ test("clean multi-turn log folds every metric", () => {
 	assert.deepEqual(view.lastContext, { tokens: 500, at: 1251 });
 	assert.deepEqual(view.lastRequest, { provider: "acme", model: "model-x", contextWindow: 128000, at: 1010 });
 	assert.equal(view.createdAt, 1000);
+});
+
+test("context sample folds the whole prompt, cache buckets included", () => {
+	// Providers report the cache buckets NEXT TO `inputTokens`, never inside it
+	// (every usage in a durable log folds to total = in + out + cache), so the
+	// request-side context is the sum. The GUI meter reads the same number.
+	const events = [
+		{
+			type: "assistant/message",
+			time: 11,
+			data: { turn: 1, step: 1, message: {}, usage: { inputTokens: 2400, outputTokens: 300, totalTokens: 93636 + 300, cacheReadTokens: 91200 } }
+		}
+	];
+	assert.deepEqual(fold(events).view.lastContext, { tokens: 93600, at: 11 }, "input + cacheRead is the sample");
+});
+
+test("a zero usage sample leaves the previous context sample alone", () => {
+	const events = [
+		{ type: "assistant/message", time: 11, data: { turn: 1, step: 1, message: {}, usage: { inputTokens: 5000, outputTokens: 10 } } },
+		{ type: "assistant/message", time: 12, data: { turn: 1, step: 2, message: {}, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0 } } }
+	];
+	const { view } = fold(events);
+	assert.deepEqual(view.lastContext, { tokens: 5000, at: 11 }, "an empty usage sample never blanks the row");
 });
 
 test("compaction/prune folds as purges independent of compactions", () => {

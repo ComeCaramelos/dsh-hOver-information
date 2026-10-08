@@ -85,7 +85,7 @@ test("apply installs the section, registers the projection, mounts the remote", 
 	mounted.installed.hooks.onChange();
 
 	assert.equal(mounted.registered.key, "hoverInfo");
-	assert.equal(mounted.registered.stateVersion, 2, "v2 folds `compaction/prune`; the bump forces already-checkpointed sessions to refold the full log");
+	assert.equal(mounted.registered.stateVersion, 3, "v3 re-folds the whole-prompt context sample (v2 added the `purges` fold); the bump forces already-checkpointed sessions to refold the full log");
 	assert.equal(typeof mounted.registered.init, "function");
 	assert.equal(typeof mounted.registered.apply, "function");
 	assert.equal(typeof mounted.registered.wire.view, "function");

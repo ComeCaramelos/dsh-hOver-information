@@ -642,7 +642,7 @@ test("stats block renders with toggles and formats applied", async () => {
 	assert.equal(byLabel.get("Received"), "5.4k");
 	assert.equal(byLabel.get("Compactions"), "1");
 	assert.equal(byLabel.get("Purges"), "2", "purge rows render right next to compactions");
-	assert.equal(byLabel.get("Context"), "81.2k / 128k · 63.4%");
+	assert.equal(byLabel.get("Context"), "81.2k / 128k · 63%", "integer percent — same figure the composer context meter renders");
 	assert.equal(byLabel.get("Subagents"), "2"); // spawned only; running is a live stat, not folded here
 	assert.equal(byLabel.get("Model"), "model-x");
 	assert.equal(byLabel.get("Cache"), undefined, "default off");
