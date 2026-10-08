@@ -7,7 +7,10 @@
  *   `{ turn, step }`, `{ turn, reason }` (`dsh-agent-loop`).
  * - `assistant/message`: `{ turn, step, message, usage?, stream }`; `usage` is
  *   the `TokenUsage` face (input/output/cache fields) and the routed model
- *   rides on `message.source.model`.
+ *   rides on `message.source.model`. The cache buckets are **disjoint** from
+ *   `inputTokens` (every usage in a durable log folds to
+ *   `totalTokens === input + output + cacheRead + cacheWrite`), so the request
+ *   side of the prompt is `input + cacheRead + cacheWrite`.
  * - `request/context`: `{ provider, model, contextWindow }` — appended when
  *   the request image changes (`dsh-agent-loop`), durable through compaction;
  *   it is the honest context-window source.
@@ -49,15 +52,30 @@ export function hoverInfoApply(state: HoverInfoState, event: SessionEvent): Hove
             if (next.openStep !== null) next = { ...next, openStep: null };
             const usage = event.data?.usage;
             if (usage && typeof usage === "object") {
-                const tokens = num(usage.inputTokens);
+                const cacheRead = num(usage.cacheReadTokens);
+                const cacheWrite = num(usage.cacheWriteTokens);
+                // The prompt side of a request is THREE disjoint buckets: the
+                // cache traffic sits NEXT TO `inputTokens`, never inside it
+                // (every usage in a durable log folds to
+                // `total === input + output + cacheRead + cacheWrite`). Both
+                // rows here read that sum — the same buckets as
+                // `dsh-token-meter`'s `pressureFrom`, which is exactly what
+                // the stock `contextPressure` projection and the GUI's own
+                // context meter render. Summing `inputTokens` alone (the
+                // earlier reading) under-reports a cache-heavy session by
+                // orders of magnitude: a session the meter shows at 35% came
+                // out at 0.9%.
+                const prompt = num(usage.inputTokens) + cacheRead + cacheWrite;
                 next = {
                     ...next,
-                    tokensIn: next.tokensIn + tokens,
+                    tokensIn: next.tokensIn + prompt,
                     tokensOut: next.tokensOut + num(usage.outputTokens),
-                    cacheRead: next.cacheRead + num(usage.cacheReadTokens),
-                    cacheWrite: next.cacheWrite + num(usage.cacheWriteTokens),
-                    lastContext: { tokens, at: event.time }
+                    cacheRead: next.cacheRead + cacheRead,
+                    cacheWrite: next.cacheWrite + cacheWrite
                 };
+                // A zero sample (an attempt that reported empty usage) leaves
+                // the previous sample alone rather than blanking the row.
+                if (prompt > 0) next = { ...next, lastContext: { tokens: prompt, at: event.time } };
             }
             return next;
         }

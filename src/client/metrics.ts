@@ -124,7 +124,10 @@ export function rowValues(row: MetricRow, view: any): { value: string; bar?: { p
             const request = view.lastRequest;
             const window = request && typeof request.contextWindow === "number" && request.contextWindow > 0 ? request.contextWindow : null;
             if (window === null) return { value: tokens + " tokens" };
-            const percent = Math.min(100, Math.round((1000 * Number(sample.tokens)) / window) / 10);
+            // Integer percent — `Math.min(100, Math.round(used / window * 100))`,
+            // the figure the stock context meter renders, so the card row and
+            // the composer meter never disagree by a rounding step.
+            const percent = Math.min(100, Math.round((Number(sample.tokens) * 100) / window));
             const tone = percent < 70 ? "dhi-ctxfill" : percent < 90 ? "dhi-ctxfill dhi-ctxfill-warn" : "dhi-ctxfill dhi-ctxfill-error";
             return { value: tokens + " / " + formatTokens(window) + " · " + percent + "%", bar: { percent: percent, tone: tone } };
         }
