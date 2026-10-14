@@ -1,8 +1,9 @@
 # dsh-hover-information — agent notes
 
-DSH plugin. Fixed names (renaming breaks cache/namespace): plugin id
-`hover-info`; settings namespace `hover-info`; locale namespace `hoverInfo`;
-bundle id `@comecaramelos/dsh-hover-information` (npm identity per
+DSH plugin. Fixed names (renaming breaks form/cache identity): plugin id
+`hover-info`; profile entry id `hover-info` (the key the configuration form
+and the bundle-patch row both go by); locale namespace `hoverInfo`; bundle id
+`@comecaramelos/dsh-hover-information` (npm identity per
 `~/.dsh/AGENTS.md` — published to npm; live profiles install it from npm).
 
 **Profile exception (permanent).** The `plugin-dev` profile
@@ -19,44 +20,41 @@ The full design lives in `docs/PLAN.md` and the final contract in
 `docs/SPEC.md`. Keep PLAN coherent; if an implementation revises a plan
 finding, append an "Incremento implementado" note rather than silently
 diverging. The metrics block + `hoverInfo` projection unit + `hoverInfo`
-Typert remote + Settings card landed in this increment — their deviations
-from PLAN are recorded in PLAN §15.
+Typert remote landed in earlier increments (PLAN §15); the configuration
+surface moved onto the dsh 0.2.0 profile configuration form in PLAN §36.
 
 ## Architecture in one line
 
 Sources live in `src/host/**` + `src/client/**` and are compiled by
 `npm run build` into `lib/**` (the published/consumed tree — `lib/` is build
 output, never hand-edit). The public face of the host half is `src/index.ts`,
-which re-exports only; the wiring lives in `src/host/apply.ts`, which installs
-the `hover-info` settings section, registers the `hoverInfo` projection unit
-(`src/host/projection/**`, a pure fold of one session's durable log) and
+which re-exports only; the wiring lives in `src/host/apply.ts`, which attaches
+the bundle row's own configuration form, registers the `hoverInfo` projection
+unit (`src/host/projection/**`, a pure fold of one session's durable log) and
 mounts the `hoverInfo` Typert remote (`src/host/remote/**`, endpoints
-`POST /api/hoverInfo/{sessions,stats,killJob}`). The browser half (`src/client/**`,
-emitted by `scripts/build-client.mjs` as ONE lazy-CJS
+`POST /api/hoverInfo/{sessions,stats}`). Since dsh 0.2.0 the browser
+half reads and writes the row's own configuration through
+`configForms.get("hover-info")` — there is no settings namespace and no
+`settings.yaml` — and it registers the Plugins page's `plugins.bundle.config`
+slot keyed by the package name, so the form stands **on the bundle's own page**
+(the one the Plugins list opens, like the built-in Web search entry), not in a
+Settings card and not one step further in, on the `hover-info` row's page. The browser half (`src/client/**`, emitted by
+`scripts/build-client.mjs` as ONE lazy-CJS
 `window.__ModuleLoader__.load` bundle at `lib/client.js`) watches
 `document.body` for the stock hover-card portal, injects copy-id / copy-path
 icons and a metrics block — resolving identity from the browser `sessions`
 store (`list.getSnapshot().byId`) + fiber fast-path, and metrics from the live
 `connection.rpc` → `hoverInfo/stats` endpoint or, when the host does not have
 that session loaded, the cached `hoverInfo` projection the store row already
-carries (cached per session by `refreshMs`). It also grows two header tools
-(copy content / copy path) on the stock document preview, detected only
-through its `data-document-preview` / `data-textpreview-path` attributes,
-gated by the `showPreviewTools` setting (its own catalog block on the Settings
-card: off detaches the injected bar live, on re-seats it). It also overwrites
+carries (cached per session by `refreshMs`). It also overwrites
 the composer model-selector's tooltip (the seat trigger + the open menu's root
 cells) with `${provider} > ${model}`, resolved from the `ModelSelect` fiber's
 `directory` store (DOM fallback only while the model list is open) and gated
-by the `showModelProvider` setting (its own catalog block on the Settings
-card: off restores the stock `title` live, on re-seats it). It also grows one
-kill button on each **live** (`running`/`stopping`) row of the session
-header's `JobListAction` background-job list — a `hoverInfo/killJob`
-`{sessionId, jobId}` RPC that cancels the job through the host's `jobs`
-registry — detected through the menu's localized `aria-label` (ns `job`) and
-the row/store identity (fiber `key` per row, `snapshot.jobsBySession[sessionId]`),
-never any hashed class, gated by the `showJobKill` setting (its own catalog
-block on the Settings card: off detaches the buttons live, on re-seats them)
-— settled rows never grow a button (PLAN §34).
+by the `showModelProvider` setting (its own catalog block on the row's
+configuration page: off restores the stock `title` live, on re-seats it).
+The sidebar-preview header tools and the background-job kill buttons this
+plugin used to grow are **shell-native since dsh 0.2.0** — both halves are
+removed, not disabled (PLAN §39).
 
 ## Rules that must not regress
 
@@ -76,6 +74,16 @@ block on the Settings card: off detaches the buttons live, on re-seats them)
   swallowing are per-card DOM operations, never global monkey-patching
   (never patch `HoverCard` — its reference is closed over in the shell
   bundle).
+- **Handing a card back belongs to the unmount, not to a switch.** There is no
+  master `active` toggle: since dsh 0.2.0 the Plugins page answers whether this
+  bundle runs by its own row, so disabling the row takes `apply` out — that is
+  the off (PLAN §40), and a configuration switch saying the same thing only
+  disagrees with it. `stripCard` (in `enhancer/hover-card.ts`) therefore runs
+  from the enhancer's `dispose`: injected nodes out, the stock lines
+  `rebuildTimeWrap` folded in re-seated at their pristine indices,
+  `role`/`tabindex`/`cursor` restored, the per-card listeners detached. A stock
+  line the shell re-rendered behind us is never re-seated (that would duplicate
+  it).
 - **Never address a stock card line by child index.** `rebuildTimeWrap` locates
   the time line by its relative-time text shape and the status glyph by the
   first `[data-state]` node in the lines that FOLLOW the title/time lines (the
@@ -90,14 +98,6 @@ block on the Settings card: off detaches the buttons live, on re-seats them)
   reads once and the status text survives only as its accessible name. The
   clone drops the source's `aria-hidden` for that to be meaningful; an
   `aria-hidden` clone carrying an `aria-label` is a no-op for screen readers.
-- **Document-preview tools** (PLAN §21): detect only through the shell's
-  stable `data-document-preview` / `data-textpreview-path` attributes, never
-  the hashed `*Header`/`*tool` CSS classes. Content source: the renderer's
-  fiber `content` prop (exact source, viewer-independent); `eof: false` falls
-  back to `workspaceFiles/readAll` (the wire scope id only resolves a
-  workspace-root `cwd` — never confines the absolute path requested). No live
-  session or failed readAll → copy the loaded pages; byte renderers copy
-  nothing.
 - **Composer model-selector tooltip** (PLAN §33): overwrite the seat trigger
   (`button[class$="_trigger"]` inside `div[data-slot="conversation.input.model"]`)
   and the open menu's `button[class$="_cell"][role="menuitem"]` cells with
@@ -111,33 +111,31 @@ block on the Settings card: off detaches the buttons live, on re-seats them)
   per sync pass from a live seat's trigger (the only anchor whose fiber
   return-chain reliably reaches `directory`). A portal menu cell's OWN chain
   never reaches it and the DOM source is invisible while the list is closed,
-  so without this third source only the trigger ever resolved live. Nothing
-  resolvable → leave the stock `title` untouched (fail-open). Writes are
-  diff-only and
-  capture the DOM's stock `title` (or absence) for restore; off / `active:false`
-  restores everything.
-- **Background-job kill buttons** (PLAN §34): the row's LIVE vs settled status
-  is read ONLY from the live store's `snapshot.jobsBySession[sessionId]` (the
-  row DOM is never consulted) — a settled row must grow no button, and a row
-  that settles behind us loses its own on the next sync. The menu is anchored
-  by its localized `aria-label` (`job` / `list.aria`) — never the hashed
-  `*_menu` class (a `QsffPG_*` name is build-scoped); the session id rides the
-  menu fiber's `return` chain and the job id each row fiber's `key`
-  (positional fallback onto the store order). A kill is NOT a force: the host
-  flips the record to `stopping` and lets the row settle, and every failure
-  code is treated as a no-op (fail-open). The button is the row's last child
-  (`dhi-kill`, `data-hi-jobkill`/`data-hi-job`) — diff-only, one in flight per
-  row. `showJobKill: false` / `active:false` detaches every mounted button and
-  leaves discovery off.
+  so without this third source only the trigger ever resolved live. The store
+  **subscription** has the same anchor trap: the `ModelSelect` component that
+  carries `directory` renders *inside* the `data-slot` seat, so the seat
+  element's own return chain answers nothing — subscribe through the seat's
+  **trigger** (whose chain does reach it), with the seat as fallback, or no
+  subscription is ever registered and a switch that moves no DOM attribute
+  never resyncs. Nothing resolvable → leave the stock `title` untouched
+  (fail-open). Writes are diff-only and
+  capture the DOM's stock `title` (or absence) for restore; off (or this half
+  unmounting) restores everything.
+
 
 ## Layout
 
 - `src/index.ts` — the host half's public face: re-exports only (`apply`,
-  `Config`/`SettingsSchema`, `inject`/`name`, `hoverInfoProjectionDefinition`,
+  `Config`/`ConfigValues`, `inject`/`name` (inject is empty: nothing resolves
+  eagerly), `hoverInfoEntryId`, `hoverInfoProjectionDefinition`,
   `HoverInfoRemote`, fixed identifiers, types). The wiring itself is
-  `src/host/apply.ts`: `hover-info` settings section + projection registration
-  + `new HoverInfoRemote(ctx)` (no `ctx.provide` for the Service — its
-  constructor self-registers; namespace `hoverInfo`).
+  `src/host/apply.ts`: the row's configuration-form attach (`src/host/settings.ts`
+  — `@comecaramelos/dsh-ancesters`' `attachSettingsForm` over `CONFIG_FIELDS`,
+  `liveKeys: []`: the entry-id rule and `settings.configure({ auto: false }, fiber)`
+  inside one fiber effect live there) + projection registration + `new HoverInfoRemote(ctx)` (no
+  `ctx.provide` for the Service — its constructor self-registers; namespace
+  `hoverInfo`). Nothing routes commits: no host consumer reads the config, so
+  an edit changes what the browser renders and nothing the host answers.
 - `src/host/projection/{state,fold,index}.ts` — the `hoverInfo` projection
   fold (pure, synchronous: state schemas, event fold, definition). Its
   `stateSchema` / `wire.viewSchema` must be **zod** (`import { z } from
@@ -149,7 +147,7 @@ block on the Settings card: off detaches the buttons live, on re-seats them)
   The fold itself is `fold.ts`; `state.ts` holds the zod schemas (which is why
   they must be zod — see below); `index.ts` assembles
   `hoverInfoProjectionDefinition()`.
-- `src/host/remote/{index,services,sessions,stats,jobs}.ts` — `index.ts` is the
+- `src/host/remote/{index,services,sessions,stats}.ts` — `index.ts` is the
   `TypertRemoteService` subclass with a **manual**
   prototype descriptor (no `@Remote` decorators: the gateway's
   `remoteMethods()` reads the prototype own-property
@@ -163,26 +161,33 @@ block on the Settings card: off detaches the buttons live, on re-seats them)
   The domain failure codes this remote throws are merged into
   `RemoteErrorDetailsMap` by a `declare module` block in `index.ts`, so the
   typed constructor accepts them and the wire `code` stays stable. The
-  sessions/stats computation lives in `sessions.ts`/`stats.ts`, the kill in
-  `jobs.ts` (`killJobFor(ctx, sessionId, jobId)` passes the live agent to
-  `jobs.kill(id, agent)` — the registry's owner fence demands it), and
-  service resolution lives in `services.ts` (all through `ctx.get`, same
-  rule as above).
+  sessions/stats computation lives in `sessions.ts`/`stats.ts`, and service
+  resolution lives in `services.ts` (all through `ctx.get`, same rule as
+  above). The kill endpoint the background-job buttons used to call is gone
+  (PLAN §39) — this remote answers `sessions` and `stats` only.
 - `src/client/**` — browser half, one `__ModuleLoader__.load` bundle emitted
-  from `src/client/index.ts`: `index.ts` surface (`apply` + `inject` + budgets),
-  `apply.ts` (dictionaries + card + enhancer), `plugin-meta.ts`/`constants.ts`
-  (mirrored identifiers — it cannot import `src/host/constants.ts`),
+  from `src/client/index.ts`: `index.ts` (`apply` + `inject` + budgets, and the row
+  card: the `mountSettingsCard` descriptor from `@comecaramelos/dsh-ancesters/client`,
+  which owns the styles → locales → controller → slot registration;
+  `placement: "bundle"` puts it in `plugins.bundle.config` keyed by the package
+  name; `build-client.mjs` aliases it
+  to `client/source` and bundles it in), `plugin-meta.ts`/`constants.ts`
+  (mirrored identifiers — it cannot import `src/host/constants.ts`; the entry
+  id doubles as the configuration form's key),
   `metrics.ts` (`METRICS` table + formats), `locales/{index,en-US}.ts`,
   `styles/{index,hover-card,card}.ts` (literal `dhi*` class names; the sheets
   travel as strings and are DOM-checked per document — CSS-module scoping would
   hash the very names the structural DOM checks read),
-  `card/{card,field-row,icons}.ts` + `controller/{index,fields}.ts` (the
-  Settings card), and `enhancer/**` (detect/lines/fiber/identify/time/host/
-  stats/copy/metrics-block/hover-card/preview/model/jobs + the per-mount `env.ts`
-  and mount `index.ts`). `connection.rpc.call("/api", "hoverInfo/stats", { args })`.
-  The `enhancer/jobs.ts` half grows one kill button per **live** row of the
-  session header's `JobListAction` background-job list (`hoverInfo/killJob`,
-  gated by `showJobKill`); settled rows stay stock (PLAN §34).
+  `card/{body,field-row,fields}.ts` (the card's one declared block: `bindBody`
+  projects the ancesters `CardSnapshot` — `values` + `overridden` — into the
+  fields and composes the write doors over the shared `CardController`;
+  `writeField` / `resetField` / `stage` for the refreshMs draft), and `enhancer/**` (detect/lines/fiber/identify/time/host/
+  stats/copy/metrics-block/hover-card/model + the per-mount `env.ts` and mount
+  `index.ts`). `connection.rpc.call("/api", "hoverInfo/stats", { args })`.
+  The document-preview and background-job halves that used to live here are
+  gone — both affordances are shell-native since dsh 0.2.0 (PLAN §39) — so
+  the enhancer owns exactly two surfaces: the hover card and the composer
+  model selector.
   Metrics have two sources: the live `stats` fetch (authoritative, but it only
   answers while the host has that session loaded) and, when no live view is
   held, the `hoverInfo` value the browser's own session-list row already
@@ -201,25 +206,27 @@ block on the Settings card: off detaches the buttons live, on re-seats them)
   marked `data-hi-title`; the injected CSS pins `[data-hi-session]
   [data-hi-title]{font-size:16px}` and `.dhi-twrap` carries `font-size:12px`,
   sizes never applied inline and never via the hash-prefixed class. The
-  settings-card body composes FIVE `dhiCard_catalog` blocks in the reference
-  card's (`dsh-chrome-mcp`) Settings shape: catalog 1 carries the master
-  `active` switch as its own two-row field (`.field` = `.fieldRow` title +
+  row-configuration body composes TWO `dhiCard_catalog` blocks in the
+  reference (`dsh-chrome-mcp`) row-page shape: catalog 1 carries the
+  `showModelProvider` switch (the composer model-selector tooltip) as its own
+  two-row field (`.field` = `.fieldRow` title +
   switch inline, `.fieldDesc` hint below — badge + reset ride the row between
-  title and switch); catalog 2 carries the `showPreviewTools` switch (the sidebar file-preview header tools) as its own two-row field, same shape; catalog 3 carries the `showModelProvider` switch (the composer model-selector tooltip) as its own two-row field, same shape; catalog 4 carries the `showJobKill` switch (the background-job kill buttons) as its own two-row field, same shape; catalog 5 stacks the 13 metric toggles in a TWO-COLUMN
+  title and switch); catalog 2 stacks the 13 metric toggles in a TWO-COLUMN
   grid filled column-major (`grid-auto-flow: column` over an inline
   `grid-template-rows: repeat(ceil(n/2), auto)`, DOM order stays `METRICS`
   order) above the refresh-interval field (title + inline input in the row,
   hint — or the invalid message — below). The seam rule lives on
-  `.catalog + .catalog` only — the body already draws the card's top rule, so
-  no catalog adds a second one; `ensureCardCss` is DOM-checked per document —
+  `.catalog + .catalog` only — the page already opens the first block with its
+  own top rule, so no catalog adds a second one; `ensureCardCss` is DOM-checked per document —
   never re-introduce a module-level "already injected" flag, it breaks a
   second document's styles.
 - `test/client.test.mjs` + `test/dom.mjs` — hand-rolled DOM stubs, no jsdom;
-  `store(byId)` mirrors `sessions.list.getSnapshot()`, `makeScope` mirrors
-  the bound settings scope, `connection.rpc` stub for stats.
+  `store(byId)` mirrors `sessions.list.getSnapshot()`, `makeForm` mirrors
+  the served configuration form (snapshot + `mutate` door), `connection.rpc` stub for stats.
 - `test/host.test.mjs` / `test/unit.test.mjs` / `test/remote.test.mjs` —
   host wiring, fold table, remote formulas with fake ctx.
-- `docs/PLAN.md` — design + "Incremento implementado" notes (§14, §15);
+- `docs/PLAN.md` — design + "Incremento implementado" notes (§14, §15, §36,
+  §39, §40);
   `docs/SPEC.md` — final contract. Read §2/§6/§8 before touching the
   enhancer.
 
@@ -273,7 +280,8 @@ npm test           # builds first, then node --test over the built lib/**
   two `@deepseek-ai/dsh-client-*` ids the bundle `require`s (they resolve
   inside the running GUI and exist in no local `node_modules`), and `react` /
   `react/jsx-runtime` typecheck through their devDependency `@types/*`. The
-  DOM-`require`d service shapes live in `enhancer/host.ts` / `controller/*`.
+  DOM-`require`d service shapes live in `enhancer/host.ts`; the card's come typed
+  from `@comecaramelos/dsh-ancesters/client`.
 - `npm run dev` watches the **host** half only (`tsc --watch`). After editing
   any `src/client/**` source run `npm run build:client` — otherwise the browser
   half stays whatever the last full build left in `lib/client.js`.
@@ -286,9 +294,14 @@ npm test           # builds first, then node --test over the built lib/**
   `__ModuleLoader__` stub over a hand-rolled DOM (`test/dom.mjs`): fiber
   fast-path, DOM title fallback, duplicate-title tie-break, workspace-card
   rejection, metrics toggles/formats/cache-TTL/RPC fail-open, re-injection,
-  dispose — plus a `react-dom/server` render of the settings card.
-- `test/host.test.mjs` covers identity, `SettingsSchema` defaults/bounds and
-  `installSection` + projection registration + remote mount on a fake ctx;
+  dispose — plus `react-dom/server` renders of the row configuration page (both
+  the `summary` line and the `page` body, and the page-owned write door).
+- `test/host.test.mjs` covers identity (`inject` is `[]`), the whole-surface
+  volatile/default table over `Config`, the `refreshMs` bounds, the
+  entry-id rule (a fiber with no profile entry throws) and the
+  `settings.configure({ auto: false }, fiber)` attach — one call per fiber,
+  disposed with the instance — plus projection registration and remote mount
+  on a fake ctx;
   `test/unit.test.mjs` the fold table (turn dedup, usage sanitization, tool
   pairing + turn-end drop, null context window); `test/remote.test.mjs` the
   descriptor discovery + `sessions()`/`stats()` formulas + typed
@@ -316,8 +329,16 @@ manifest entry, materialized by pnpm:
 The browser client injects the live services it reads
 (`@deepseek-ai/dsh-api-session-controller`,
 `@deepseek-ai/dsh-client-connection`,
-`@deepseek-ai/dsh-client-locale`, `@deepseek-ai/dsh-client-ui-settings`) —
-all already mounted by the base profile, so deploy stays manifest-only.
+`@deepseek-ai/dsh-client-locale`, `@deepseek-ai/dsh-client-ui-plugin-manager`,
+`@deepseek-ai/dsh-client-ui-settings`) —
+all already mounted by the base profile, so deploy stays manifest-only. The
+last two matter for configuration: the settings surface hands the row's form,
+the plugin-manager half exposes the `plugins.bundle.config` slot the body
+renders into. Both stay listed for a hard reason, not hygiene: the slot's
+`locale: "hoverInfo"` is what answers `props.t` (`localeSeat(face,
+entry.locale)`), and the renderer raises a slot-assembly error when no locale
+face is installed — dropping `dsh-client-locale` takes the whole configuration card out,
+not just its strings.
 
 For source-level iteration use the `plugin-dev` profile (its `link:` +
 symlink is the permanent local-reference exception, see the profile note at
@@ -340,6 +361,10 @@ echo '[]' > /tmp/dsh-hi-home/profiles/verify/cordis.yml
 echo '[]' > /tmp/dsh-hi-home/profiles/verify/cordis.patch.yml
 DSH_HOME=/tmp/dsh-hi-home dsh --profile verify --dump-config | grep -A5 hover-info
 ```
+
+The row must come out as `id: hover-info` — that id is what the configuration
+form and the row page both resolve by, so a dump that keys it by the package
+name means the patch row lost its `id`.
 
 ### End-to-end remote check with no live sessions
 
@@ -365,6 +390,45 @@ curl -s -b /tmp/hi-cookies.txt -X POST "${URL%%token=}api/hoverInfo/stats" \
 (The index route's `?token=` only mints the signed session cookie on `GET /`,
 so the RPC smoke must reuse that cookie.)
 
+### Configuration form check (same fixture)
+
+The row's own form must be **served** by the Host and **writable**. From the
+boot above (cookie already minted; `BASE` is the origin, no token):
+
+```sh
+curl -s -b /tmp/hi-cookies.txt -X POST "${BASE}api/settings/describe" \
+  -H 'Content-Type: application/json' \
+  --data '{"type":"client-request","rpcId":"cfg-1","method":"settings/describe","payload":{"args":{}}}' \
+  | python3 -c "import json,sys;v=json.load(sys.stdin)['result']['value'];\
+      n=[x for x in v['namespaces'] if x['ns']=='hover-info'][0];\
+      print(n['autoGenerate'], n['applies'], n['revision'], len(n['schema']['refs']), n['user'])"
+# → False live 0 16 {}   (autoGenerate false = the generated page stays off;
+#   16 = the root Config ref + the 15 volatile fields)
+curl -s -b /tmp/hi-cookies.txt -X POST "${BASE}api/settings/mutate" \
+  -H 'Content-Type: application/json' \
+  --data '{"type":"client-request","rpcId":"cfg-2","method":"settings/mutate","payload":{"args":{"ns":"hover-info","ops":[{"op":"set","path":["showModel"],"value":false}]}}}'
+# → {"result":{"ok":true,"value":{"ns":"hover-info","revision":1,
+#     "user":{"showModel":false}, …}}}
+```
+
+One op answers exactly ONE user-layer key. If an untouched field turns up
+alongside an unrelated op, something pinned that default in the row patch's own
+`config:`
+(GUI checklist item 8) — the bundle patch here declares id + name only, and a
+host test guards it.
+
+
+A `false` from `mutate` is **not** an error path to swallow: the client form
+recovers by reloading the Host document (that is why the ancesters `CardController` reissues a
+refused pass, `MAX_WRITE_PASSES = 4`). Writing persists into the profile's own
+patch document — `profiles/verify/cordis.patch.yml` grows `id`/`name`/`config`
+— so a bundle-patch row is writable and a save check against `bundles:` proves
+saving (an earlier belief that any patch row refuses writes was measured wrong:
+what refuses is a field pinned **above** the document, a `--patch` overlay
+answering `Configuration for "hover-info" is overridden by a home patch or
+command-line overlay` with `settings/rejected`, per field, never page-wide).
+`{op:"unset"}` behaves the same and answers the field's base layer back.
+
 ## GUI checklist (needs a live `dsh web`)
 
 1. Hover a session row → card appears within ~500 ms; the card's ONE header
@@ -380,62 +444,53 @@ so the RPC smoke must reuse that cookie.)
 4. Workspace (project) card keeps its stock copy-path behavior.
 5. Metrics block appears under the stock lines with the defaults (turns,
    steps, tokens in/out, compactions, purges, context, subagents, model) and
-   formats applied; toggling a metric in Settings → Plugins updates open
-   cards <1 s.
-6. `active: false` in the Settings card (or disabling the bundle row) →
-   stock card everywhere.
+   formats applied; toggling a metric on the Plugins page's own row
+   configuration page updates open cards <1 s.
+6. Disabling the bundle row (the only off there is) → stock card everywhere,
+   **including a card that is already open**: the enhancer's unmount hands its
+   injections and its folded stock lines back to the shell, and re-enabling the
+   row re-seats the same card on the next hover. There is no `active` switch to
+   flip — it answered the same question the row's own enable answers (PLAN §40).
 7. A session with neither a live host entry nor cached `hoverInfo` projection
    values (or the endpoint absent) → stock card, at most one console debug
    line. A session that is only cached (the cold-start case) must still render
    its metrics block from the row's projection values.
-8. Settings → Plugins card: collapsible, closed by default; FIVE catalog
-   blocks separated by hairline seams; catalog 1 = master switch as a
-   two-row field (title + switch inline, hint below), catalog 2 = the
-   `showPreviewTools` sidebar-preview switch as its own two-row field
-   (same shape), catalog 3 = the `showModelProvider` composer model-selector
-   switch as its own two-row field (same shape), catalog 4 = the `showJobKill`
-   kill-button switch as its own two-row field (same shape), catalog 5 = the
-   13 metric toggles forming TWO COLUMNS
+8. Plugins page → click this bundle in the list: its page opens with the
+   configuration right there (no step into the `hover-info` component; the
+   component row still lists below it, with no configure link of its own). The
+   page's description line is the package description — never
+   whether it runs (the bundle's own enable answers that); inside the page
+   detail, TWO catalog blocks separated by a hairline
+   seam (the page owns the container, the title and the description — no
+   collapsible card shell, no chevron); catalog 1 = the
+   `showModelProvider` composer model-selector switch as its own two-row field
+   (title + switch inline, hint below); catalog 2 = the 13 metric toggles forming TWO COLUMNS
    filled top→bottom per column (left 7 /
    right 6, DOM order stays `METRICS` order) above the refresh-interval field
-   (title + inline input, hint below); Overridden badge + reset per field;
-   invalid refreshMs drafts never write.
-9. Open a text file in the sidebar preview → header grows two tool buttons
-   (only while the `showPreviewTools` switch is on) next to
-   Open-with/wrap/reload (content copy + path copy, check marks
-   1.3 s). Copy path → absolute path in clipboard, zero RPC. Copy content on
-   a fully loaded file → exact source; on a Markdown preview the SOURCE is
-   copied, not rendered text. A byte/PDF preview click copies nothing (one
-   debug line only). Toggling the switch on an already-open preview detaches
-   / re-seats the bar live (no reload).
-10. Close the preview tab / switch away → no leaked observers; the lazy
-    heartbeat starts with the first preview/card and stops with the last.
-    `active: false` → preview header stays stock.
-11. Composer model selector (only while the `showModelProvider` switch is on):
+   (title + inline input, hint below); Overridden badge + reset per field, and
+   only on the fields actually edited; invalid refreshMs drafts never write; a
+   field pinned above the patch document (a `--patch` overlay) refuses its write
+   and snaps the control back; only a profile that answers form edits as
+   read-only grows the read-only note. Nothing here may pin a default in the row
+   patch's own `config:` — the Host folds that layer into every later write, so
+   an untouched field would read Overridden for no edit of its own (measured;
+   guarded by a host test).
+9. Composer model selector (only while the `showModelProvider` switch is on):
     hover the composer's model-selector trigger → tooltip reads
     `Provider > Model` (e.g. `OpenRouter > GPT-5`), not the shell's
     `Model · Effort`; open the selector menu → the two root cells (Model /
     Effort row) carry the same `Provider > Model` tooltip, **and** the Model
-    row's visible value (the `cellValue` span the shell renders as the bare
-    model name) now reads `Provider > Model`. The Effort row's value is left
+    row's visible value (the `cellValue` span) now reads `Provider > Model`
+    whichever stock shape the shell rendered — the bare model name, or its own
+    `provider/model` pairing. The Effort row's value is left
     as the shell rendered it (the stock-guard skips it). Switching model (or
     provider) updates both the tooltip and the visible value immediately
     without a DOM attribute change (the directory-store subscription drives
-    it; React's render of the bare model name is recaptured before
-    re-pairing). Toggling `showModelProvider` off (or `active: false`)
-    restores both the shell's original tooltip and its current bare model
-    name live, with no reload; toggling back re-seats both. A session with no
+    it; the shell's render of the current value is recaptured before
+    re-pairing). Toggling `showModelProvider` off
+    restores both the shell's original tooltip and the value it was rendering
+    live, with no reload; toggling back re-seats both. Disabling the bundle row
+    hands the whole selector surface back with it (the enhancer's unmount
+    restores every managed `title`). A session with no
     resolvable selection (no fiber source, model list never opened) leaves
     the shell's stock tooltip untouched (fail-open).
-
-12. Background-job list (only while the `showJobKill` switch is on): open the
-    session header's background-job menu → every LIVE row (`running` /
-    `stopping`) carries a kill button at its right end (a small ✕ icon,
-    `data-hi-jobkill`), settled rows (`completed` / `killed` / `failed`) show
-    NOTHING extra; clicking it flips the row to `stopping` (the kill is a
-    cancel, not a force) and the row settles as `killed` — the button vanishes
-    with the row. A live job that settles behind us loses its button on the
-    next sweep (≤1 s). A kill request already in flight ignores extra clicks.
-    `showJobKill` off (or `active: false`) detaches every button live and the
-    menu stays stock; switching back re-seats them with no reload. A menu
-    whose session id cannot be resolved leaves every row stock (fail-open).

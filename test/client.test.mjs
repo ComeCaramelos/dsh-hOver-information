@@ -8,7 +8,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
-import { createDom, makeCard, attachFiber, makePreview, attachPropsFiber, makeModelSeat, makeJobMenu } from "./dom.mjs";
+import { createDom, makeCard, attachFiber, attachPropsFiber, makeModelSeat } from "./dom.mjs";
 
 const requireCjs = createRequire(import.meta.url);
 
@@ -72,7 +72,8 @@ const bundle = loaded.factory((id) => {
 
 test("the bundle exports the apply surface, the inject list and the cache budgets", () => {
 	assert.equal(typeof bundle.apply, "function");
-	assert.deepEqual(bundle.inject, ["sessions", "connection", "locale", "settingsScope", "slots"]);
+	// The enhancer's two services, then the card's own set (dsh-ancesters).
+	assert.deepEqual([...bundle.inject], ["sessions", "connection", "configForms", "slots", "locale", "remote", "remote.settings"]);
 	// The card/enhancer halves mount from `apply`; the budgets pin the cache
 	// TTL (host default) and the failed-attempt retry ceiling.
 	assert.equal(bundle.DEFAULT_REFRESH_MS, 30000);
@@ -83,8 +84,6 @@ const NOW = Date.now();
 
 /** Default composed settings snapshot for the browser half. */
 const BASE_SETTINGS = {
-	active: true,
-	showPreviewTools: true,
 	showModelProvider: true,
 	refreshMs: 30000,
 	showTurns: true,
@@ -112,8 +111,8 @@ const WORKSPACE_TIME_EN = {
 };
 
 /** A session store snapshot face matching `sessions.list.getSnapshot()`. */
-function store(byId, jobsBySession) {
-	return { list: { getSnapshot: () => ({ ids: Object.keys(byId), byId, jobsBySession }) }, subscribe: () => () => {} };
+function store(byId) {
+	return { list: { getSnapshot: () => ({ ids: Object.keys(byId), byId }) }, subscribe: () => () => {} };
 }
 
 /** A stats payload shaped like the host `hoverInfo/stats` result. */
@@ -139,17 +138,24 @@ function statsPayload(overrides = {}) {
 }
 
 /**
- * A mutable fake settings scope mirroring the stock bound-scope surface,
- * shared across the card controller and the enhancer's own bind.
+ * A mutable fake configuration form, mirroring the surface the browser half
+ * reads and writes through since dsh 0.2.0: `getSnapshot()` (whose `user` layer
+ * answers the Overridden badge), `subscribe()` for live pushes, and `mutate(ops)`
+ * as the write door — no namespace binding, no scope. `set`/`unset` are kept as
+ * shorthands over the same door so the tests that drive one edit stay
+ * readable, and every accepted write advances the mirrored revision the way the
+ * real form's fence does.
  */
-function makeScope(overrides = {}) {
-	const scope = {
+function makeForm(overrides = {}) {
+	const form = {
 		writes: [],
+		revision: 1,
 		state: {
 			status: "ready",
 			value: { ...BASE_SETTINGS, ...overrides },
 			base: { ...BASE_SETTINGS },
 			user: { ...overrides },
+			revision: 1,
 			writable: true
 		},
 		listeners: new Set(),
@@ -160,31 +166,41 @@ function makeScope(overrides = {}) {
 			this.listeners.add(listener);
 			return () => this.listeners.delete(listener);
 		},
-		set(field, value) {
-			this.writes.push(["set", field, value]);
-			this.state = {
-				...this.state,
-				value: { ...this.state.value, [field]: value },
-				user: { ...this.state.user, [field]: value }
-			};
+		mutate(ops) {
+			const value = { ...this.state.value };
+			const user = { ...this.state.user };
+			let touched = 0;
+			for (const op of ops) {
+				const field = op.path[0];
+				if (op.op === "unset") {
+					this.writes.push(["unset", field]);
+					delete user[field];
+				} else {
+					this.writes.push(["set", field, op.value]);
+					value[field] = op.value;
+					user[field] = op.value;
+				}
+				touched++;
+			}
+			if (touched === 0) return Promise.resolve(false);
+			this.revision++;
+			this.state = { ...this.state, value, user, revision: this.revision };
 			for (const listener of this.listeners) listener();
-			return Promise.resolve();
+			return Promise.resolve(true);
+		},
+		set(field, value) {
+			return this.mutate([{ op: "set", path: [field], value }]);
 		},
 		unset(field) {
-			this.writes.push(["unset", field]);
-			const user = { ...this.state.user };
-			delete user[field];
-			this.state = { ...this.state, user, value: { ...this.state.base, ...user } };
-			for (const listener of this.listeners) listener();
-			return Promise.resolve();
+			return this.mutate([{ op: "unset", path: [field] }]);
 		}
 	};
-	return scope;
+	return form;
 }
 
 function setup({ sessions = store({}), settings = {}, stats = null, withSlots = false, dom = createDom(), preApply = null } = {}) {
 	// Interval accounting: `created`/`cleared` track the lazy sweep heartbeat
-	// (started with the first open card/preview, stopped with the last one),
+	// (started with the first open card, stopped with the last one),
 	// `unrefCalls` proves the client un-refs the Node timer handle so a
 	// forgotten `dispose` can never hold the test process alive, and the
 	// captured callbacks let a test drive one tick synchronously.
@@ -231,11 +247,7 @@ function setup({ sessions = store({}), settings = {}, stats = null, withSlots = 
 					return Promise.resolve();
 				}
 			}
-		},
-		// Browser base64 + UTF-8 decoders (Node-backed stand-ins) used by
-		// the preview readAll fallback.
-		atob: (value) => Buffer.from(value, "base64").toString("binary"),
-		TextDecoder: TextDecoder
+		}
 	};
 	win.document = dom.doc;
 
@@ -247,6 +259,9 @@ function setup({ sessions = store({}), settings = {}, stats = null, withSlots = 
 		register(ns, dict) {
 			locale.registered.push({ ns, dict });
 			return () => {};
+		},
+		bind(ns) {
+			return (key) => locale.translate(ns, key);
 		},
 		translate(ns, key, params) {
 			let template = key;
@@ -266,8 +281,11 @@ function setup({ sessions = store({}), settings = {}, stats = null, withSlots = 
 		}
 	};
 
-	/** The single shared scope instance both halves bind to. */
-	const scope = makeScope(settings);
+	/** The one configuration form both halves read and write through. */
+	const form = makeForm(settings);
+	/** Entry ids the browser half asked the form service for — the entry-id rule
+	 * is what makes an aliasing card impossible to miss. */
+	const served = [];
 
 	/** Connection RPC face: the stats payload rides the rpc envelope. */
 	const rpcCalls = [];
@@ -295,8 +313,18 @@ function setup({ sessions = store({}), settings = {}, stats = null, withSlots = 
 
 	const ctx = {
 		locale,
-		settingsScope: {
-			bind: () => scope
+		configForms: {
+			get(entryId) {
+				served.push(entryId);
+				return form;
+			},
+			describe() {
+				return { getSnapshot: () => ({ view: { namespaces: [{ ns: "hover-info" }] } }) };
+			},
+			whileServed(_namespaces, register) {
+				const dispose = register(new Set(["hover-info"]));
+				return typeof dispose === "function" ? dispose : () => {};
+			}
 		},
 		slots: withSlots ? slots : undefined,
 		get(name) {
@@ -320,7 +348,8 @@ function setup({ sessions = store({}), settings = {}, stats = null, withSlots = 
 		doc: dom.doc,
 		ctx,
 		locale,
-		scope,
+		form,
+		served,
 		slots,
 		rpcCalls,
 		intervals,
@@ -340,11 +369,6 @@ function stockCopySurface(dom, target) {
 
 function fire(dom, { added = [], removed = [] } = {}) {
 	dom.flush([{ addedNodes: added, removedNodes: removed }]);
-}
-
-/** One attribute record for one target (the preview path element mount). */
-function fireAttr(dom, target) {
-	dom.flush([{ type: "attributes", attributeName: "data-textpreview-path", target }]);
 }
 
 function bars(card) {
@@ -579,13 +603,37 @@ test("no match leaves the stock card untouched", () => {
 	env.dispose();
 });
 
-test("active=false disables the enhancer", () => {
-	const env = setup({ settings: { active: false }, sessions: store({ s1: { id: "s1", displayTitle: "Fix bug", cwd: "/x", updatedAt: NOW, blank: false } }) });
-	const card = makeCard(env.dom, { title: "Fix bug", time: "now", statuses: ["Idle"] });
+test("no master switch rides the configuration", () => {
+	// Since dsh 0.2.0 the Plugins page answers whether this bundle runs by
+	// its own row: a configuration switch saying the same thing is redundant
+	// (docs/PLAN.md §40), so nothing here takes `active` at all.
+	const env = setup({});
+	assert.equal(env.form.state.value.active, void 0, "the served config carries no active field");
+	env.dispose();
+});
+
+test("an unmount hands an already-open card back to the shell", () => {
+	// The one "off" left is the bundle row being disabled, which unmounts this
+	// half. A card open at that moment must not stay half-restructured.
+	const env = setup({ sessions: store({ s1: { id: "s1", displayTitle: "Fix bug", cwd: "/x", updatedAt: NOW, blank: false } }) });
+	const card = makeCard(env.dom, { title: "Fix bug", time: "now", statuses: [{ label: "Idle", glyph: true }] });
+	attachFiber(card, { id: "s1", title: "Fix bug" });
 	env.doc.body.appendChild(card);
 	fire(env.dom, { added: [card] });
-	assert.equal(card.getAttribute("data-hi-session"), null);
+	assert.equal(card.getAttribute("data-hi-session"), "s1");
+
 	env.dispose();
+	const stack = card.firstElementChild;
+	assert.equal(card.getAttribute("data-hi-session"), null);
+	assert.equal(card.getAttribute("role"), "button");
+	assert.equal(card.getAttribute("tabindex"), "0");
+	assert.equal(card.style.cursor, "");
+	assert.equal(
+		stack.children.map((line) => (line.textContent || "").trim()).join(" | "),
+		"Fix bug | now | Idle",
+		"every stock line sits back where the shell put it"
+	);
+	assert.equal(stack.children.filter((line) => String(line.className || "").indexOf("dhi-") >= 0).length, 0);
 });
 
 test("removal is cleaned up; dispose removes the style tag", () => {
@@ -696,7 +744,7 @@ test("metrics respect settings toggles applied live", async () => {
 	await tick();
 	assert.equal(metricLines(card).length, 0);
 	// Re-enable turns live: the open card re-renders without a reload.
-	await env.scope.set("showTurns", true);
+	await env.form.set("showTurns", true);
 	fire(env.dom, { added: [] });
 	await tick();
 	const rows = new Map(metricLines(card));
@@ -936,168 +984,220 @@ test("dispose stops the heartbeat even with cards still open", () => {
 	assert.equal(env.intervals.cleared, 1);
 });
 
-// ── settings card ────────────────────────────────────────────────────────────
+// ── configuration card ─────────────────────────────────────────────────────
+//
+// Configuration stands on the bundle's own page in the Plugins list
+// (`plugins.bundle.config`, keyed by the package name): clicking the plugin
+// opens the form directly, with no step into the `hover-info` component. The
+// page asks for the `page` shape only and hands no form of its own.
 
-/** Renders the injected card component against the controller face. */
-function renderCard(env, { writable = true, available = true } = {}) {
+// The card is `@comecaramelos/dsh-ancesters`' `mountSettingsCard`: its
+// controller, write passes and registration order are that package's own
+// tests. What stays here is this plugin's descriptor — the slot and key it
+// registers under, the body its one block draws, and the doors `bindBody`
+// composes over the shared controller.
+
+/**
+ * Render the registered component the way the bundle page does (`{ view }`
+ * only). Returns the html plus the shared controller the registration injects.
+ */
+function renderCard(env, { view = "page" } = {}) {
 	const { renderToString } = requireCjs("react-dom/server");
 	const React = requireCjs("react");
 	assert.equal(env.slots.registrations.length, 1, "one slot registration");
 	const { entry, component } = env.slots.registrations[0];
-	assert.equal(entry.name, "settings.plugin.item");
-	assert.equal(entry.key, "hover-info");
-	assert.equal(entry.locale, "hoverInfo");
-	const face = entry.inject();
-	const hook = face.hooks.hoverInformationCard;
-	let snapshot = hook.getSnapshot();
-	if (!available) snapshot = { available: false, writable: false, fields: {} };
-	return {
-		html: renderToString(
-			React.createElement(component, {
-				t: (key) => {
-					const dict = env.locale.registered.find((entry2) => entry2.ns === "hoverInfo").dict;
-					return dict.en[key] ?? key;
-				},
-				useHoverInformationCard: (selector) => selector(snapshot),
-				toggle: face.toggle,
-				editRefresh: face.editRefresh,
-				commitRefresh: face.commitRefresh,
-				resetField: face.resetField
-			})
-		),
-		face,
-		hook
-	};
+	const { controller } = entry.inject();
+	const html = renderToString(React.createElement(component, { view }));
+	return { html, controller };
 }
 
-test("the card registers under the settings.plugin.item slot with the hoverInfo locale", () => {
+/** The block's face — the projected fields and the four doors — off the
+ * current snapshot, the way the block's `bind` composes it on every render. */
+function face(controller) {
+	return bundle.bindBody(controller.getSnapshot(), controller);
+}
+
+test("the card registers on the bundle's own page, keyed by the package", () => {
 	const env = setup({ withSlots: true });
+	assert.equal(env.slots.registrations.length, 1, "the row page is not claimed as well");
 	const registered = env.slots.registrations[0];
-	assert.equal(registered.entry.name, "settings.plugin.item");
-	assert.equal(registered.entry.key, "hover-info");
+	assert.equal(registered.entry.name, "plugins.bundle.config");
+	// The bundle page is keyed by the package name — the page the list opens.
+	assert.equal(registered.entry.key, "@comecaramelos/dsh-hover-information");
 	assert.equal(registered.entry.locale, "hoverInfo");
+	// The entry id every read and write goes through is the row id, not a
+	// namespace and not the package.
+	assert.deepEqual([...new Set(env.served)], ["hover-info"]);
 	env.dispose();
 });
 
-test("the card renders closed by default (no field controls)", () => {
+test("the page shape renders every field with no card shell", () => {
 	const env = setup({ withSlots: true });
 	const { html } = renderCard(env);
-	assert.match(html, /dhiCard_card/);
-	assert.doesNotMatch(html, /Turns|Refresh interval/);
+	// The page owns the container: no collapsed header, no chevron, no card list
+	// item — only the body the page wraps.
+	assert.doesNotMatch(html, /dhiCard_header|dhiCard_chevron|<li /, "no shell is re-drawn inside the page");
+	assert.match(html, /dhiCard_body/, "the body is what is rendered");
+	const dict = env.locale.registered.find((entry) => entry.ns === "hoverInfo").dict.en;
+	for (const key of ["modelProvider", "refresh", "metricTurns", "metricModel", "metricCreatedAt"]) {
+		assert.ok(html.includes(dict[key]), `field copy for "${key}" is rendered`);
+	}
 	env.dispose();
 });
 
-test("an open card renders every metric toggle plus refreshMs", () => {
+test("the Overridden badge rides only the fields the user layer carries", () => {
+	// Nothing stored → the page answers every field from the row config and draws
+	// no badge and no reset anywhere.
+	const clean = setup({ withSlots: true });
+	let { html } = renderCard(clean);
+	assert.equal((html.match(/dhiCard_badges/g) || []).length, 0, "an empty user layer draws no badge");
+	assert.doesNotMatch(html, /dhiCard_reset/, "and no reset control");
+	clean.dispose();
+
+	// Two fields stored in the user layer → exactly two badge pairs, and the
+	// badge text is the localized one. Everything else keeps a bare row.
+	const dirty = setup({ withSlots: true, settings: { showContext: false, refreshMs: 5000 } });
+	({ html } = renderCard(dirty));
+	const dict = dirty.locale.registered.find((entry) => entry.ns === "hoverInfo").dict.en;
+	assert.equal((html.match(/dhiCard_badges/g) || []).length, 2, "one badge pair per stored field");
+	assert.equal((html.match(/dhiCard_reset/g) || []).length, 2, "the reset rides every badge");
+	assert.equal(html.split(dict.overridden).length - 1, 2, "the badge says Overridden, twice");
+	dirty.dispose();
+});
+
+test("the summary shape draws nothing: the bundle page states the package description", () => {
 	const env = setup({ withSlots: true });
-	const { html } = renderCard(env);
-	// The open body is behind `open` state; render by pushing open through the controller hook?
-	// The component opens via useState in renderToString (single pass, closed). Render the open
-	// body by asserting the controls exist when state is forced — the Face-driven check:
-	// toggles are live-driven, so instead assert the closed header only here, and cover open
-	// fields through face operations below.
-	assert.match(html, /Hover information/);
+	assert.equal(renderCard(env, { view: "summary" }).html, "");
 	env.dispose();
 });
 
-test("toggle writes go straight to the user layer", async () => {
+test("nothing renders before the row is served", () => {
+	const env = setup({ withSlots: true });
+	env.form.state = { status: "loading" };
+	for (const listener of env.form.listeners) listener();
+	assert.equal(renderCard(env).html, "", "an unserved entry draws nothing rather than defaults");
+	env.dispose();
+});
+
+test("toggle writes go straight to the patch layer", async () => {
 	const env = setup({ withSlots: true, settings: { showTurns: true } });
-	const { face } = renderCard(env);
-	await face.toggle("showModel", false);
-	const write = env.scope.writes.find((entry) => entry[0] === "set" && entry[1] === "showModel");
+	const { controller } = renderCard(env);
+	await face(controller).toggle("showModel", false);
+	const write = env.form.writes.find((entry) => entry[0] === "set" && entry[1] === "showModel");
 	assert.ok(write);
 	assert.equal(write[2], false);
-	const snapshot = face.hooks.hoverInformationCard.getSnapshot();
-	assert.equal(snapshot.fields.showModel.raw, false);
+	assert.equal(face(controller).fields.showModel.raw, false);
 	env.dispose();
 });
 
 test("invalid refreshMs drafts are rejected, valid commits land", async () => {
 	const env = setup({ withSlots: true });
-	const { face } = renderCard(env);
-	face.editRefresh("7");
-	let snap = face.hooks.hoverInformationCard.getSnapshot();
-	assert.equal(snap.fields.refreshMs.invalid, true);
-	await face.commitRefresh();
-	assert.deepEqual(env.scope.writes.find((entry) => entry[1] === "refreshMs"), undefined, "invalid commit does not write");
-	face.editRefresh("4500");
-	assert.equal((await face.commitRefresh()) === true, true);
-	const write = env.scope.writes.find((entry) => entry[1] === "refreshMs");
+	const { controller } = renderCard(env);
+	face(controller).editRefresh("7");
+	assert.equal(face(controller).fields.refreshMs.invalid, true);
+	assert.equal(await face(controller).commitRefresh(), false);
+	assert.deepEqual(env.form.writes.find((entry) => entry[1] === "refreshMs"), undefined, "invalid commit does not write");
+	face(controller).editRefresh("4500");
+	assert.equal(face(controller).fields.refreshMs.invalid, false);
+	assert.equal(await face(controller).commitRefresh(), true);
+	const write = env.form.writes.find((entry) => entry[1] === "refreshMs");
 	assert.equal(write[2], 4500);
+	// The draft leaves with the write: the field reads the served answer again.
+	assert.equal(face(controller).fields.refreshMs.raw, "4500");
+	assert.equal(controller.getSnapshot().dirty, false);
 	env.dispose();
 });
 
 test("resetField unsets the user override", async () => {
 	const env = setup({ withSlots: true, settings: { showModel: false } });
-	const { face } = renderCard(env);
-	assert.equal(face.hooks.hoverInformationCard.getSnapshot().fields.showModel.overridden, true);
-	await face.resetField("showModel");
-	const unset = env.scope.writes.find((entry) => entry[0] === "unset" && entry[1] === "showModel");
+	const { controller } = renderCard(env);
+	assert.equal(face(controller).fields.showModel.overridden, true);
+	await face(controller).resetField("showModel");
+	const unset = env.form.writes.find((entry) => entry[0] === "unset" && entry[1] === "showModel");
 	assert.ok(unset);
+	assert.equal(face(controller).fields.showModel.overridden, false);
+	env.dispose();
+});
+
+test("the bundle page hands no form: every edit takes the shared one", async () => {
+	const env = setup({ withSlots: true });
+	const { controller } = renderCard(env);
+	assert.equal(await face(controller).toggle("showModel", false), true, "the write lands");
+	assert.deepEqual(env.form.writes, [["set", "showModel", false]], "through the row's configuration form");
 	env.dispose();
 });
 
 test("read-only mode renders without crashing", () => {
 	const env = setup({ withSlots: true });
-	env.scope.state.writable = false;
+	// An answer that the entry cannot be written is what stands in for
+	// read-only, so it arrives the way a Host answer would: on the served
+	// snapshot, pushed — not by poking the controller's own copy.
+	env.form.state = { ...env.form.state, writable: false };
+	for (const listener of env.form.listeners) listener();
 	const { html } = renderCard(env);
-	assert.match(html, /dhiCard_/);
+	assert.match(html, /dhiCard_/, "the body still renders");
+	assert.match(html, /Configuration is read-only/, "and says why nothing can be saved");
 	env.dispose();
 });
 
-test("the open card body composes five catalog blocks", () => {
-	// The component's open toggle is a plain `react.useState` — the bundle's
-	// react is the same instance the test drives, so one temporary override
-	// renders the OPEN body and lets the DOM shape be asserted directly.
-	const env = setup({ withSlots: true });
-	const React = requireCjs("react");
-	const realUseState = React.useState;
-	React.useState = function () {
-		return [true, function () {}];
-	};
-	let html;
-	let dict;
-	try {
-		dict = env.locale.registered.find((entry) => entry.ns === "hoverInfo").dict.en;
-		html = renderCard(env).html;
-	} finally {
-		React.useState = realUseState;
+test("the card mounts nothing outside the row slot: the enhancer DOM is identical with it", () => {
+	// The other plane: one enhanced hover card, with and without the row card
+	// mounted. The card's own sheets live in <head>; the body the enhancer
+	// works on must not move by a node.
+	function enhancedBody(withSlots) {
+		const env = setup({ withSlots, sessions: store({ s1: { id: "s1", displayTitle: "Fix bug", cwd: "/x", updatedAt: NOW, blank: false } }) });
+		const hover = makeCard(env.dom, { title: "Fix bug", time: "now", statuses: [{ label: "Idle", glyph: true }] });
+		attachFiber(hover, { id: "s1", title: "Fix bug" });
+		env.doc.body.appendChild(hover);
+		fire(env.dom, { added: [hover] });
+		const tree = JSON.stringify(serialize(env.doc.body));
+		env.dispose();
+		return tree;
 	}
+	const withCard = enhancedBody(true);
+	assert.match(withCard, /dhi-/, "the enhancer did run");
+	assert.equal(withCard, enhancedBody(false));
+});
+
+/** A plain tree of one DOM-stub node: tag, class, the `data-hi-*` marks, text, children. */
+function serialize(node) {
+	const children = Array.isArray(node.children) ? node.children : [];
+	return {
+		tag: node.tagName,
+		className: String(node.className || ""),
+		session: node.getAttribute ? node.getAttribute("data-hi-session") : null,
+		text: children.length === 0 ? String(node.textContent || "") : "",
+		children: children.map(serialize)
+	};
+}
+
+test("the body composes two catalog blocks", () => {
+	const env = setup({ withSlots: true });
+	const { html } = renderCard(env);
+	const dict = env.locale.registered.find((entry) => entry.ns === "hoverInfo").dict.en;
 	const catalogOpen = 'class="dhiCard_catalog"';
 	const firstCatalog = html.indexOf(catalogOpen);
 	const secondCatalog = html.indexOf(catalogOpen, firstCatalog + 1);
-	const thirdCatalog = html.indexOf(catalogOpen, secondCatalog + 1);
-	const fourthCatalog = html.indexOf(catalogOpen, thirdCatalog + 1);
-	const fifthCatalog = html.indexOf(catalogOpen, fourthCatalog + 1);
 	assert.notEqual(firstCatalog, -1, "catalog 1 rendered");
 	assert.notEqual(secondCatalog, -1, "catalog 2 rendered");
-	assert.notEqual(thirdCatalog, -1, "catalog 3 rendered");
-	assert.notEqual(fourthCatalog, -1, "catalog 4 rendered");
-	assert.notEqual(fifthCatalog, -1, "catalog 5 rendered");
-	assert.equal(html.indexOf(catalogOpen, fifthCatalog + 1), -1, "exactly five catalog blocks");
-	// Catalog 1 — the master switch as its two-row field, hint below.
-	assert.ok(html.indexOf(dict.active) > firstCatalog && html.indexOf(dict.active) < secondCatalog, "active title rides catalog 1");
-	assert.ok(html.indexOf(dict.activeHint) > firstCatalog && html.indexOf(dict.activeHint) < secondCatalog, "hint sits as catalog 1's field description");
-	// Catalog 2 — the sidebar-preview tools toggle as its own catalog block,
+	assert.equal(html.indexOf(catalogOpen, secondCatalog + 1), -1, "exactly two catalog blocks");
+	// Catalog 1 — the composer model-selector toggle as its own catalog block,
 	// two-row field shape, hint below.
-	assert.ok(html.indexOf(dict.previewTools) > secondCatalog && html.indexOf(dict.previewTools) < thirdCatalog, "preview-tools title rides catalog 2");
-	assert.ok(html.indexOf(dict.previewToolsHint) > secondCatalog && html.indexOf(dict.previewToolsHint) < thirdCatalog, "hint sits as catalog 2's field description");
-	// Catalog 3 — the composer model-selector toggle as its own catalog block,
-	// two-row field shape, hint below.
-	assert.ok(html.indexOf(dict.modelProvider) > thirdCatalog && html.indexOf(dict.modelProvider) < fourthCatalog, "model-selector title rides catalog 3");
-	assert.ok(html.indexOf("Show the current selection as") > thirdCatalog && html.indexOf("Off leaves the standard tooltip") < fourthCatalog, "hint sits as catalog 3's field description");
-	// Catalog 4 — the background-job kill toggle as its own catalog block,
-	// two-row field shape, hint below.
-	assert.ok(html.indexOf(dict.jobKill) > fourthCatalog && html.indexOf(dict.jobKill) < fifthCatalog, "job-kill title rides catalog 4");
-	assert.ok(html.indexOf("kill button to the running rows") > fourthCatalog && html.indexOf("Off leaves the job list") < fifthCatalog, "hint sits as catalog 4's field description");
-	// Catalog 5 — the metric grid (column-major rows = ceil(13/2)) above the
-	// refresh-interval field, both inside the fifth catalog.
-	assert.ok(html.indexOf('style="grid-template-rows:repeat(7, auto)"') > fifthCatalog, "column-major grid lives in catalog 5");
-	assert.ok(html.indexOf(dict.refresh) > fifthCatalog, "refresh field rides catalog 5");
-	assert.ok(html.indexOf(dict.metricTurns) > fifthCatalog, "metric titles are catalog 5 grid children");
+	assert.ok(html.indexOf(dict.modelProvider) > firstCatalog && html.indexOf(dict.modelProvider) < secondCatalog, "model-selector title rides catalog 1");
+	assert.ok(html.indexOf("Show the current selection as") > firstCatalog && html.indexOf("Off leaves the standard tooltip") < secondCatalog, "hint sits as catalog 1's field description");
+	// No master switch anywhere: the dictionary carries no copy for it, so
+	// nothing on the page can label a field with it.
+	assert.equal("active" in dict, false, "the dictionary answers no master switch");
+	assert.equal("activeHint" in dict, false, "and no hint for one");
+	// Catalog 2 — the metric grid (column-major rows = ceil(13/2)) above the
+	// refresh-interval field, both inside the second catalog.
+	assert.ok(html.indexOf('style="grid-template-rows:repeat(7, auto)"') > secondCatalog, "column-major grid lives in catalog 2");
+	assert.ok(html.indexOf(dict.refresh) > secondCatalog, "refresh field rides catalog 2");
+	assert.ok(html.indexOf(dict.metricTurns) > secondCatalog, "metric titles are catalog 2 grid children");
 	env.dispose();
 });
 
-test("the injected card CSS lays the metric toggles out in two columns", () => {
+test("the injected CSS lays the metric toggles out in two columns", () => {
 	const env = setup({ withSlots: true });
 	const style = env.doc.querySelector(
 		'style[data-plugin-css="@comecaramelos/dsh-hover-information/HoverInformationCard.module.css"]'
@@ -1111,7 +1211,7 @@ test("the injected card CSS lays the metric toggles out in two columns", () => {
 	env.dispose();
 });
 
-test("the injected card CSS composes the body as catalog blocks", () => {
+test("the injected CSS composes the body as catalog blocks", () => {
 	const env = setup({ withSlots: true });
 	const style = env.doc.querySelector(
 		'style[data-plugin-css="@comecaramelos/dsh-hover-information/HoverInformationCard.module.css"]'
@@ -1132,231 +1232,6 @@ test("the injected card CSS composes the body as catalog blocks", () => {
 	env.dispose();
 });
 
-// ── document-preview enhancer (docs/PLAN.md §19) ────────────────────────────
-
-/** Locate one preview's injected tools bar (the last child of the header). */
-function previewTools(preview) {
-	return Array.from(preview.header.children).find((child) => child.getAttribute("data-hi-tools") === "1");
-}
-
-test("preview: header tools injected on mount, path copies without any RPC", async () => {
-	const env = setup({});
-	const preview = makePreview(env.dom);
-	env.doc.body.appendChild(preview.root);
-	fireAttr(env.dom, preview.pathEl);
-
-	const bar = previewTools(preview);
-	assert.ok(bar, "tools bar injected into the preview header");
-	assert.equal(preview.header.children[preview.header.children.length - 1], bar, "the bar sits last in the toolbar row");
-	const buttons = bar.children.filter((child) => child.tagName === "BUTTON");
-	assert.equal(buttons.length, 2);
-	assert.equal(buttons[0].getAttribute("data-hi-preview-tool"), "content");
-	assert.equal(buttons[1].getAttribute("data-hi-preview-tool"), "path");
-	assert.equal(buttons[0].getAttribute("aria-label"), "Copy file content");
-	assert.equal(buttons[1].getAttribute("aria-label"), "Copy file path");
-
-	buttons[1].dispatchEvent(new env.dom.DomEvent("click", buttons[1]));
-	await tick();
-	assert.deepEqual(env.win.navigator.clipboard.written, ["/home/u/proj/AGENTS.md"]);
-	assert.equal(env.rpcCalls.length, 0, "path copy never touches the host");
-
-	env.dispose();
-});
-
-test("preview: content copy sources from the fiber text (exact source, zero IO)", async () => {
-	const env = setup({});
-	const preview = makePreview(env.dom, { path: "/x/README.md", title: "Markdown" });
-	env.doc.body.appendChild(preview.root);
-	attachPropsFiber(preview.root, { content: { kind: "text", text: "# Title\n\nsource", eof: true } });
-	fireAttr(env.dom, preview.pathEl);
-
-	const bar = previewTools(preview);
-	bar.children[0].dispatchEvent(new env.dom.DomEvent("click", bar.children[0]));
-	await tick();
-	assert.deepEqual(env.win.navigator.clipboard.written, ["# Title\n\nsource"]);
-	assert.equal(env.rpcCalls.length, 0, "a fully loaded source costs no host round trip");
-
-	env.dispose();
-});
-
-test("preview: not-eof content falls back to workspaceFiles/readAll", async () => {
-	let calls = [];
-	const stats = (endpoint, payload) => {
-		calls.push({ endpoint, payload });
-		const full = Buffer.from("full file source\nline two", "utf-8").toString("base64");
-		return { data: full, eof: true, absolutePath: "/x/big.log", version: "v1" };
-	};
-	const env = setup({
-		sessions: store({ s1: { id: "s1", displayTitle: "Big", cwd: "/x", updatedAt: NOW, blank: false } }),
-		stats
-	});
-	const preview = makePreview(env.dom, { path: "/x/big.log" });
-	env.doc.body.appendChild(preview.root);
-	attachPropsFiber(preview.root, { content: { kind: "text", text: "only the loaded pages", eof: false } });
-	fireAttr(env.dom, preview.pathEl);
-
-	const bar = previewTools(preview);
-	bar.children[0].dispatchEvent(new env.dom.DomEvent("click", bar.children[0]));
-	await tick();
-	await tick();
-	assert.deepEqual(calls.length, 1, "exactly one readAll call");
-	assert.equal(calls[0].endpoint, "workspaceFiles/readAll");
-	assert.deepEqual(calls[0].payload.args, { workspaceFileScopeId: "s1", path: "/x/big.log" });
-	assert.deepEqual(env.win.navigator.clipboard.written, ["full file source\nline two"]);
-
-	env.dispose();
-});
-
-test("preview: not-eof without a live session copies what loaded", async () => {
-	const env = setup({ sessions: store({}) });
-	const preview = makePreview(env.dom, { path: "/x/big.log" });
-	env.doc.body.appendChild(preview.root);
-	attachPropsFiber(preview.root, { content: { kind: "text", text: "loaded pages only", eof: false } });
-	fireAttr(env.dom, preview.pathEl);
-
-	const bar = previewTools(preview);
-	bar.children[0].dispatchEvent(new env.dom.DomEvent("click", bar.children[0]));
-	await tick();
-	await tick();
-	assert.deepEqual(env.win.navigator.clipboard.written, ["loaded pages only"]);
-	assert.equal(env.rpcCalls.length, 0);
-
-	env.dispose();
-});
-
-test("preview: a byte renderer copies nothing and stays silent", async () => {
-	const env = setup({ sessions: store({ s1: { id: "s1", cwd: "/x", updatedAt: NOW, blank: false } }) });
-	const preview = makePreview(env.dom, { path: "/x/doc.pdf" });
-	env.doc.body.appendChild(preview.root);
-	attachPropsFiber(preview.root, { content: { kind: "bytes", pages: [], eof: true } });
-	fireAttr(env.dom, preview.pathEl);
-
-	const bar = previewTools(preview);
-	bar.children[0].dispatchEvent(new env.dom.DomEvent("click", bar.children[0]));
-	await tick();
-	await tick();
-	assert.deepEqual(env.win.navigator.clipboard.written, [], "no source → no clipboard write");
-	assert.equal(env.rpcCalls.length, 0, "byte renderers never readAll blindly");
-
-	env.dispose();
-});
-
-test("preview: a re-render that reorders the bar re-seats it on resync", () => {
-	const env = setup({});
-	const preview = makePreview(env.dom);
-	env.doc.body.appendChild(preview.root);
-	fireAttr(env.dom, preview.pathEl);
-
-	// React re-renders and appends another tool button after our bar.
-	const extra = env.dom.createElement("button");
-	extra.setAttribute("data-textpreview-tool", "wrap");
-	preview.header.appendChild(extra);
-
-	env.dom.flush([]);
-
-	const bar = previewTools(preview);
-	assert.equal(preview.header.children[preview.header.children.length - 1], bar, "the tools bar ends the toolbar row again");
-	env.dispose();
-});
-
-test("preview: already-open at mount enhances without records", () => {
-	const dom = createDom();
-	const preview = makePreview(dom);
-	dom.doc.body.appendChild(preview.root);
-	const env = setup({ dom });
-	assert.ok(previewTools(preview), "the mount-time tree scan catches a restored file tab");
-	env.dispose();
-});
-
-test("preview: opens the heartbeat and the sweep forgets a closed preview", () => {
-	const env = setup({});
-	const preview = makePreview(env.dom);
-	env.doc.body.appendChild(preview.root);
-	fireAttr(env.dom, preview.pathEl);
-	assert.equal(env.intervals.created, 1, "the first open preview starts the heartbeat");
-	assert.equal(env.intervals.unrefCalls, 1);
-
-	preview.root.remove();
-	env.sweepCallbacks[0]();
-	assert.equal(env.intervals.cleared, 1, "an open preview removed from the DOM stops the heartbeat");
-
-	// A re-fire for the gone root must not resurrect state or throw.
-	fireAttr(env.dom, preview.pathEl);
-	env.dispose();
-});
-
-test("preview: a file tab opened after the enhancer mounted is found via childList records", async () => {
-	const dom = createDom();
-	const env = setup({ dom });
-	// The live case: React inserts the whole preview DOM into body's subtree
-	// *after* apply ran. The root arrives with its anchor attributes already
-	// present (the value never changes, so no attribute record is possible) —
-	// only childList records can surface a fresh mount.
-	const preview = makePreview(dom);
-	dom.doc.body.appendChild(preview.root);
-	dom.flush([{ type: "childList", target: dom.doc.body, addedNodes: [preview.root], removedNodes: [] }]);
-
-	const bar = previewTools(preview);
-	assert.ok(bar, "the late-mounted preview grew the tools bar");
-	const buttons = bar.children.filter((child) => child.tagName === "BUTTON");
-	assert.equal(buttons.length, 2);
-
-	buttons[1].dispatchEvent(new dom.DomEvent("click", buttons[1]));
-	await tick();
-	assert.deepEqual(env.win.navigator.clipboard.written, ["/home/u/proj/AGENTS.md"]);
-	env.dispose();
-});
-
-test("preview: a loaded-then-ready preview enhances when its path element lands", () => {
-	const dom = createDom();
-	const env = setup({ dom });
-	// First click shows the body and no header path yet (enhance fails);
-	// when the path element arrives, DOM mutates *inside* the root, so the
-	// target's ancestor walk finds the unregistered root and retries.
-	const preview = makePreview(dom);
-	const pathEl = preview.pathEl;
-	preview.header.removeChild(pathEl);
-	dom.doc.body.appendChild(preview.root);
-	preview.header.appendChild(pathEl);
-	dom.flush([{ type: "childList", target: preview.header, addedNodes: [pathEl], removedNodes: [] }]);
-
-	assert.ok(previewTools(preview), "the preview re-checked on DOM mutating inside its root");
-	env.dispose();
-});
-
-test("preview: showPreviewTools off injects no header tools", () => {
-	const env = setup({ settings: { showPreviewTools: false } });
-	const preview = makePreview(env.dom);
-	env.doc.body.appendChild(preview.root);
-	fireAttr(env.dom, preview.pathEl);
-	assert.equal(previewTools(preview), undefined, "no tools bar while the preview switch is off");
-	env.dispose();
-});
-
-test("preview: the preview-tools switch applies live both ways", async () => {
-	const env = setup();
-	const preview = makePreview(env.dom);
-	env.doc.body.appendChild(preview.root);
-	fireAttr(env.dom, preview.pathEl);
-	assert.ok(previewTools(preview), "tools injected with the switch at its default");
-
-	// Off: the scope notification re-syncs the open preview and detaches the
-	// bar in the same tick (the diff-only resync keeps the state, so the bar
-	// node survives for the re-enable).
-	await env.scope.set("showPreviewTools", false);
-	assert.equal(previewTools(preview), undefined, "the bar detaches when the switch flips off");
-	preview.header.children.forEach(function (child) {
-		assert.notEqual(child.getAttribute && child.getAttribute("data-hi-tools"), "1", "no injected bar child remains in the header");
-	});
-
-	// On: the same open preview re-seats its existing bar, no reload.
-	await env.scope.set("showPreviewTools", true);
-	const bar = previewTools(preview);
-	assert.ok(bar, "the bar re-seats when the switch flips back on");
-	assert.equal(preview.header.children[preview.header.children.length - 1], bar, "the bar ends the toolbar row again");
-	env.dispose();
-});
-
 // ── composer model selector (docs/PLAN.md §33) ──────────────────────────────
 
 test("model selector: a composer open at mount is caught without records", () => {
@@ -1373,6 +1248,18 @@ test("model selector: the seat trigger tooltip carries `provider > model`", () =
 	fire(env.dom, { added: [seat.seat] });
 	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini", "the trigger carries the provider-prefixed label");
 	env.dispose();
+});
+
+test("model selector: a provider-paired stock value is rewritten too", () => {
+	const env = setup({});
+	const seat = makeModelSeat(env.dom, { withMenu: true, pairValue: true });
+	// The live shape: this build renders the Model row's value as
+	// `provider/model` rather than the bare model name, so the bare-name stock
+	// guard would have skipped it. Restore puts exactly that pair back.
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.cellValues[0].textContent, "OpenRouter > GPT-4o mini", "the paired stock value rewrites to the tooltip form");
+	env.dispose();
+	assert.equal(seat.cellValues[0].textContent, "OpenRouter/GPT-4o mini", "the shell's own rendering comes back");
 });
 
 test("model selector: the open menu's root cells carry the same title", () => {
@@ -1421,7 +1308,7 @@ test("model selector: a live selection change rewrites the visible value", () =>
 	assert.equal(seat.cellValues[0].textContent, "Anthropic > Claude Sonnet 4", "the visible pair rides the live selection");
 	// A switch off restores the shell's *current* model name (recaptured from
 	// React's render), not the one captured when the menu first mounted.
-	return env.scope.set("showModelProvider", false).then(() => {
+	return env.form.set("showModelProvider", false).then(() => {
 		assert.equal(seat.cellValues[0].textContent, "Claude Sonnet 4", "off restores the shell's current model name");
 	});
 });
@@ -1449,6 +1336,28 @@ test("model selector: live-shaped fiber chains resolve the menu cells through th
 	assert.equal(seat.cells[0].getAttribute("title"), "Anthropic > Claude Sonnet 4", "the fallback rides the live selection, not a stale capture");
 	env.dispose();
 	assert.equal(seat.cells[0].getAttribute("title"), null, "dispose restores the cell's stock absence of title");
+});
+
+test("model selector: a live selection change resyncs through the trigger's store", () => {
+	// The live GUI shape: the seat anchor's OWN fiber chain reaches no store
+	// (`ModelSelect` renders inside the seat, not above it) — a subscription
+	// read off the anchor answers nothing, and a switch that moves no DOM
+	// attribute never resyncs. The trigger is the anchor whose chain answers.
+	const dom = createDom();
+	const seat = makeModelSeat(dom, { chain: true, storeViaTrigger: true });
+	const env = setup({ dom });
+	fire(env.dom, { added: [seat.seat] });
+	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini", "the trigger resolves through its own return chain");
+	// A live switch with no DOM record at all — only the store subscription
+	// can answer it.
+	seat.store.set({
+		current: { provider: "anthropic", model: "claude-sonnet-4" },
+		groups: [{ id: "anthropic", name: "Anthropic", models: [{ id: "claude-sonnet-4", name: "Claude Sonnet 4" }] }]
+	});
+	return tick().then(() => {
+		assert.equal(seat.trigger.getAttribute("title"), "Anthropic > Claude Sonnet 4", "the subscription rides the live selection with no DOM change");
+		env.dispose();
+	});
 });
 
 test("model selector: without the fiber store, the open model list is the source", () => {
@@ -1484,23 +1393,22 @@ test("model selector: flipping the switch off restores; flipping back re-seats",
 	const seat = makeModelSeat(env.dom, { withMenu: true });
 	fire(env.dom, { added: [seat.seat] });
 	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini");
-	await env.scope.set("showModelProvider", false);
+	await env.form.set("showModelProvider", false);
 	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "off restores the stock trigger tooltip");
 	assert.equal(seat.cells[0].getAttribute("title"), null, "off removes the injected cell titles");
-	await env.scope.set("showModelProvider", true);
+	await env.form.set("showModelProvider", true);
 	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini", "back on re-seats every title");
 	assert.equal(seat.cells[0].getAttribute("title"), "OpenRouter > GPT-4o mini", "and re-seats the cells");
 	env.dispose();
 });
 
-test("model selector: master off restores the stock selector everywhere", async () => {
+test("model selector: an unmount restores the stock selector everywhere", () => {
 	const env = setup({});
 	const seat = makeModelSeat(env.dom);
 	fire(env.dom, { added: [seat.seat] });
 	assert.equal(seat.trigger.getAttribute("title"), "OpenRouter > GPT-4o mini");
-	await env.scope.set("active", false);
-	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "master off restores the stock tooltip");
 	env.dispose();
+	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "unmounting hands the selector back to the shell");
 });
 
 test("model selector: a selection change rides the store subscription, without DOM records", () => {
@@ -1524,182 +1432,4 @@ test("model selector: dispose hands every managed title back to the shell", () =
 	env.dispose();
 	assert.equal(seat.trigger.getAttribute("title"), "GPT-4o mini · Medium", "dispose restores the stock trigger tooltip");
 	assert.equal(seat.cells[0].getAttribute("title"), null, "dispose removes the injected cell titles");
-});
-
-// ---------------------------------------------------------------------------
-// Background-job kill buttons (docs/PLAN.md §34)
-// ---------------------------------------------------------------------------
-
-/** The shell registers the `job` dictionaries; the menu label is one of them. */
-function addJobLocale(ctx) {
-	ctx.locale.registered.push({ ns: "job", dict: { en: { "list.aria": "Background jobs" } } });
-	return () => {};
-}
-
-/** The kill buttons of one menu (row order = DOM row order). */
-function killButtons(ul) {
-	return ul.children.filter((li) => li.querySelector("[data-hi-jobkill]"));
-}
-function buttonOf(li) {
-	return li.querySelector("[data-hi-jobkill]");
-}
-
-/** The live store face for one menu: two live rows, one settled. */
-const JOB_ROWS = [
-	{ id: "job-1", status: "running" },
-	{ id: "job-2", status: "stopping" },
-	{ id: "job-3", status: "completed" }
-];
-
-function jobDom(dom) {
-	const menu = makeJobMenu(dom, {
-		sessionId: "s1",
-		rows: JOB_ROWS.map((row) => ({ id: row.id, status: row.status, live: row.status === "running" || row.status === "stopping" }))
-	});
-	dom.doc.body.appendChild(menu.root);
-	return menu;
-}
-
-test("live background-job rows grow kill buttons; settled rows stay stock", () => {
-	const dom = createDom();
-	const menu = jobDom(dom);
-	const env = setup({
-		dom,
-		sessions: store({ s1: { id: "s1", title: "Alpha" } }, { s1: JOB_ROWS }),
-		preApply: addJobLocale
-	});
-
-	const rows = killButtons(menu.ul);
-	assert.equal(rows.length, 2, "one button per live row only");
-	assert.equal(buttonOf(rows[0]).getAttribute("data-hi-job"), "job-1");
-	assert.equal(buttonOf(rows[1]).getAttribute("data-hi-job"), "job-2");
-	assert.equal(buttonOf(menu.ul.children[2]), null, "the settled row carries nothing");
-	for (const row of rows) {
-		const button = buttonOf(row);
-		assert.equal(button.className, "dhi-kill");
-		assert.equal(button.getAttribute("aria-label"), "Kill background job");
-	}
-	env.dispose();
-});
-
-test("the kill button addresses the host once per click with {sessionId, jobId}", async () => {
-	const dom = createDom();
-	const menu = jobDom(dom);
-	const env = setup({
-		dom,
-		sessions: store({ s1: { id: "s1", title: "Alpha" } }, { s1: JOB_ROWS }),
-		stats: { outcome: "requested" },
-		preApply: addJobLocale
-	});
-	const button = buttonOf(killButtons(menu.ul)[0]);
-	button.dispatchEvent(new dom.DomEvent("click", button));
-	await tick();
-	const call = env.rpcCalls.find((entry) => entry.endpoint === "hoverInfo/killJob");
-	assert.ok(call !== void 0, "the kill rides hoverInfo/killJob");
-	assert.deepEqual(call.payload, { args: { sessionId: "s1", jobId: "job-1" } });
-	env.dispose();
-});
-
-test("a second click while a kill request is in flight sends nothing extra", async () => {
-	const dom = createDom();
-	const menu = jobDom(dom);
-	let resolveKill = null;
-	const env = setup({
-		dom,
-		sessions: store({ s1: { id: "s1", title: "Alpha" } }, { s1: JOB_ROWS }),
-		preApply: addJobLocale
-	});
-	// Make the kill RPC answer manually so the second click lands while pending.
-	env.rpcCalls.length = 0;
-	const pending = new Promise((resolve) => {
-		resolveKill = resolve;
-	});
-	env.ctx.get("connection").rpc.call = (_channel, endpoint, payload) => {
-		env.rpcCalls.push({ endpoint, payload });
-		return pending;
-	};
-	const button = buttonOf(killButtons(menu.ul)[0]);
-	button.dispatchEvent(new dom.DomEvent("click", button));
-	button.dispatchEvent(new dom.DomEvent("click", button));
-	await tick();
-	assert.equal(env.rpcCalls.filter((entry) => entry.endpoint === "hoverInfo/killJob").length, 1, "one request per pending kill");
-	resolveKill({ ok: true, value: { outcome: "requested" } });
-	await tick();
-	env.dispose();
-});
-
-test("settling a job drops its kill button on the next sync", async () => {
-	const dom = createDom();
-	const menu = jobDom(dom);
-	let snapshot = { ids: ["s1"], byId: { s1: { id: "s1" } }, jobsBySession: { s1: JOB_ROWS } };
-	const sessions = { list: { getSnapshot: () => snapshot, subscribe: () => () => {} } };
-	const env = setup({ dom, sessions, preApply: addJobLocale });
-	assert.equal(killButtons(menu.ul).length, 2);
-	snapshot = {
-		ids: ["s1"],
-		byId: { s1: { id: "s1" } },
-		jobsBySession: { s1: [{ id: "job-1", status: "completed" }, { id: "job-2", status: "killed" }, { id: "job-3", status: "completed" }] }
-	};
-	sessions.list.set ? sessions.list.set(snapshot) : void 0;
-	// The shell's own churn would fire the per-menu observer; one sweep tick
-	// stands in for it.
-	for (const fn of env.sweepCallbacks) fn();
-	assert.equal(killButtons(menu.ul).length, 0, "settled rows carry no buttons");
-	env.dispose();
-});
-
-test("the kill switch off detaches every live-row button live", async () => {
-	const dom = createDom();
-	const menu = jobDom(dom);
-	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
-	assert.equal(killButtons(menu.ul).length, 2);
-	env.scope.set("showJobKill", false);
-	await tick();
-	assert.equal(killButtons(menu.ul).length, 0, "off strips the live menu");
-	env.scope.set("showJobKill", true);
-	await tick();
-	assert.equal(killButtons(menu.ul).length, 2, "on re-seats the buttons");
-	env.dispose();
-});
-
-test("the master off leaves the stock job list everywhere", async () => {
-	const dom = createDom();
-	const menu = jobDom(dom);
-	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
-	env.scope.set("active", false);
-	await tick();
-	assert.equal(killButtons(menu.ul).length, 0);
-	env.dispose();
-});
-
-test("an unresolved menu identity leaves every row stock (fail-open)", () => {
-	const dom = createDom();
-	// No store rows for the session: the live vs settled question cannot be
-	// answered, so no row gets a button.
-	const menu = makeJobMenu(dom, { sessionId: "gone", rows: [{ id: "job-1", status: "running" }] });
-	dom.doc.body.appendChild(menu.root);
-	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
-	assert.equal(killButtons(menu.ul).length, 0);
-	env.dispose();
-});
-
-test("an unanchored ul (wrong aria-label) never registers", () => {
-	const dom = createDom();
-	const menu = makeJobMenu(dom, { sessionId: "s1", ariaLabel: "Something else", rows: [{ id: "job-1", status: "running" }] });
-	dom.doc.body.appendChild(menu.root);
-	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
-	assert.equal(killButtons(menu.ul).length, 0, "the menu is anchored by its localized label");
-	env.dispose();
-});
-
-test("a menu that disappears is forgotten (no leaked observers)", () => {
-	const dom = createDom();
-	const menu = jobDom(dom);
-	const env = setup({ dom, sessions: store({ s1: { id: "s1" } }, { s1: JOB_ROWS }), preApply: addJobLocale });
-	menu.ul.parentElement.parentElement.remove(); // open menu closed
-	fire(dom, { removed: [menu.ul] });
-	for (const fn of env.sweepCallbacks) fn();
-	// A sweep with nothing connected stops the heartbeat without leaking.
-	assert.equal(env.intervals.cleared + (env.intervals.created - env.intervals.cleared), env.intervals.created);
-	env.dispose();
 });

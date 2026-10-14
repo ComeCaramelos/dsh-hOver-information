@@ -1,32 +1,26 @@
 /**
- * Browser half — the settings card stylesheet.
+ * Browser half — the configuration card stylesheet.
  *
- * The card owns its own DOM classes, so they stay literal (`dhiCard_*`) — the
- * same stable-name rule as the overlay (see ./hover-card.ts). Theme resolution
- * is fine here: the card renders inside the Settings page (a normal surface),
- * not inside the fixed-dark hover card.
+ * The configuration body owns its own DOM classes, so they stay literal
+ * (`dhiCard_*`) — the same stable-name rule as the overlay (see
+ * ./hover-card.ts). Theme resolution is fine here: the body renders inside the
+ * Plugins page (a normal surface), not inside the fixed-dark hover card.
  *
- * The block layout is the reference card's (`dsh-chrome-mcp`): `.catalog`
- * blocks stacked in the body (the seam rule `.catalog + .catalog` draws the
- * hairline BETWEEN blocks only — the body already carries the card's top
- * rule, so a catalog never adds a second one), and inside each block the
- * two-row `.field` (`.fieldRow` = title + controls inline above, `.fieldDesc`
- * = copy full-width below).
+ * Since dsh 0.2.0 the body is rendered inside the Plugins page's own section,
+ * which draws the container and the bundle's identity line — so there is no card
+ * shell, no header and no chevron to style here. What is left is the block
+ * layout the reference (`dsh-chrome-mcp`) composes configuration from:
+ * `.catalog` blocks stacked in the body (the seam rule `.catalog + .catalog`
+ * draws the hairline BETWEEN blocks only, so the stack never grows a second
+ * one), and inside each block the two-row `.field` (`.fieldRow` = title +
+ * controls inline above, `.fieldDesc` = copy full-width below).
  */
 
-/** Class-name map, addressed by the card component by logical part. */
+/** Class-name map, addressed by the components by logical part. */
 export const CARD_CSS = {
-    card: "dhiCard_card",
-    cardOpen: "dhiCard_cardOpen",
-    header: "dhiCard_header",
-    headText: "dhiCard_headText",
-    nameRow: "dhiCard_nameRow",
-    name: "dhiCard_name",
-    badge: "dhiCard_badge",
-    desc: "dhiCard_desc",
-    chevron: "dhiCard_chevron",
-    chevronOpen: "dhiCard_chevronOpen",
+    /** The page body: the catalog blocks stacked. */
     body: "dhiCard_body",
+    badge: "dhiCard_badge",
     catalog: "dhiCard_catalog",
     field: "dhiCard_field",
     fieldRow: "dhiCard_fieldRow",
@@ -43,19 +37,10 @@ export const CARD_CSS = {
 };
 
 export const CARD_CSS_TEXT =
-    `.${CARD_CSS.card}{border:.5px solid var(--dsw-alias-border-l4);background:var(--dsw-alias-bg-layer-3);border-radius:16px;list-style:none;transition:border-color .16s,background .16s}` +
-    `.${CARD_CSS.card}:hover{border-color:var(--dsw-alias-label-dimmed)}` +
-    `.${CARD_CSS.cardOpen}{background:var(--dsw-alias-bg-layer-2);border-color:var(--dsw-alias-label-dimmed)}` +
-    `.${CARD_CSS.header}{appearance:none;width:100%;font:inherit;color:inherit;text-align:left;cursor:pointer;background:0 0;border:0;border-radius:12px;align-items:center;gap:12px;padding:14px 16px;display:flex}` +
-    `.${CARD_CSS.header}:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-2px}` +
-    `.${CARD_CSS.headText}{flex-direction:column;flex:1;gap:4px;min-width:0;display:flex}` +
-    `.${CARD_CSS.nameRow}{align-items:center;gap:8px;min-width:0;display:flex}` +
-    `.${CARD_CSS.name}{color:var(--dsw-alias-label-primary);font-size:15px;font-weight:600;line-height:1.4}` +
+    // The body is the stack the page handed us — the page owns the container,
+    // so this only lays the blocks out.
+    `.${CARD_CSS.body}{flex-direction:column;gap:10px;display:flex}` +
     `.${CARD_CSS.badge}{color:var(--dsw-alias-label-secondary);border:.5px solid var(--dsw-alias-border-l4);border-radius:999px;font-size:11px;padding:1px 8px}` +
-    `.${CARD_CSS.desc}{color:var(--dsw-alias-label-tertiary);font-size:13px;line-height:1.5}` +
-    `.${CARD_CSS.chevron}{color:var(--dsw-alias-label-tertiary);flex:none;transition:transform .16s}` +
-    `.${CARD_CSS.chevronOpen}{transform:rotate(180deg)}` +
-    `.${CARD_CSS.body}{border-top:.5px solid var(--dsw-alias-border-l2);flex-direction:column;gap:10px;margin:0 16px;padding:12px 0;display:flex}` +
     // One catalog block (reference: `.catalog`) — two-row fields stacked inside,
     // with the hairline seam only between consecutive blocks.
     `.${CARD_CSS.catalog}{flex-direction:column;align-items:stretch;gap:10px;display:flex}` +
@@ -77,7 +62,7 @@ export const CARD_CSS_TEXT =
     `.${CARD_CSS.input}:disabled{cursor:default;opacity:.5}` +
     `.${CARD_CSS.input}:focus-visible{outline:2px solid var(--dsw-alias-brand-primary);outline-offset:-1px}` +
     `.${CARD_CSS.input}.${CARD_CSS.inputInvalid}{border-color:var(--dsw-alias-label-error)}` +
-    // Metric toggles stay TWO-COLUMN inside the second catalog, filled
+    // Metric toggles stay TWO-COLUMN inside the last catalog, filled
     // column-major over ceil(n/2) rows set inline (so DOM order stays METRICS
     // order). Each cell is a `.field` carrying just its `.fieldRow`;
     // `flex-wrap` lets label + Overridden + reset break within a narrow cell.

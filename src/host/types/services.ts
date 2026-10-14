@@ -21,20 +21,23 @@ export type PluginContext = Context & {
 };
 
 /**
- * The `settings` service face as this half consumes it. Only the section
- * install is read: the resolved snapshot reaches the browser through the
- * `settingsScope` service the client half injects, so no host-side consumer
- * is needed (docs/PLAN.md §5.3).
+ * The `settings` service face as this half consumes it. Since dsh 0.2.0 this is
+ * the profile configuration **form** service — one form per profile entry, keyed
+ * by the entry id, with the row config as its base layer and the profile patch
+ * as its user layer (`settings.yaml` is gone).
+ *
+ * This half makes exactly one call on it, and reads nothing else off it: the
+ * browser half reaches the same document through its own `configForms` service,
+ * so the only thing the host needs is to keep the Host-generated configuration
+ * page off while the row's own page stands (see ../settings.ts).
  */
 export interface SettingsService {
-    /** Publish one namespace: `base` is the bundle row's config layer. */
-    installSection(
-        owner: Context,
-        namespace: string,
-        schema: unknown,
-        base: unknown,
-        hooks: { setSource(source: () => unknown): void; onChange(): void },
-    ): void;
+    /**
+     * Presentation policy for the entry the owning fiber stands for.
+     * `auto: false` keeps the generated page off while the row owns its page.
+     * Disposable — and calling it twice for one fiber throws.
+     */
+    configure(presentation: { auto?: boolean }, owner?: unknown): () => void;
 }
 
 /** The `sessionProjections` registry face as this half consumes it. */
