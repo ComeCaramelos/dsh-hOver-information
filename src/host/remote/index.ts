@@ -1,12 +1,11 @@
 /**
  * Host half — the `hoverInfo` Typert remote.
  *
- * Exposes three RPC methods to the browser over the generic HTTP
+ * Exposes two RPC methods to the browser over the generic HTTP
  * endpoint surface (`POST /api/hoverInfo/<method>`):
  *
  *   ./sessions.ts   `sessions()` — the live sidebar list for card matching
  *   ./stats.ts      `stats(sessionId)` — the live metric view
- *   ./jobs.ts       `killJob(sessionId, jobId)` — cancel one live job
  *
  * Remote registration uses the documented manual descriptor rather than
  * decorators: plain-JS class decorators are not available without a build step,
@@ -16,8 +15,6 @@
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import { sessionRows } from "./sessions.js";
 import { statsFor } from "./stats.js";
-import { killJobFor } from "./jobs.js";
-import type { HoverInfoKillResult } from "./jobs.js";
 import type { HoverInfoSessionRow, HoverInfoStats } from "../types/stats.js";
 import type { PluginContext } from "../types/services.js";
 
@@ -36,10 +33,6 @@ declare module "@deepseek-ai/dsh-typert-protocol" {
     "hoverInfo/session-not-found": {};
     /** The session is live but its `hoverInfo` projection did not resolve. */
     "hoverInfo/not-loaded": {};
-    /** The host composes no background-job registry. */
-    "hoverInfo/jobs-unavailable": {};
-    /** The kill was rejected: job id unknown, or owned by another session. */
-    "hoverInfo/job-not-found": {};
   }
 }
 
@@ -69,25 +62,6 @@ export class HoverInfoRemote extends TypertRemoteService {
     stats(sessionId: string): HoverInfoStats {
         return statsFor(this.ctx, sessionId);
     }
-
-    /**
-     * Request the cancellation of one live session's background job.
-     *
-     * The kill rides the base-profile `ctx.jobs` registry with the owning
-     * session's live agent as the caller (the same owner check `job_kill`
-     * performs), so a request addressed to a session that does not own the
-     * job is refused rather than silently honoured.
-     *
-     * @param sessionId - the owning session id.
-     * @param jobId - the background-job id.
-     * @returns `{ outcome }` — `"requested"`, or `"already-finished"` when
-     *   the registry says the job had already settled.
-     * @throws RemoteError `hoverInfo/jobs-unavailable`,
-     *   `hoverInfo/session-not-found` or `hoverInfo/job-not-found`.
-     */
-    killJob(sessionId: string, jobId: string): HoverInfoKillResult {
-        return killJobFor(this.ctx, sessionId, jobId);
-    }
 }
 
 /**
@@ -100,8 +74,7 @@ Object.defineProperty(HoverInfoRemote.prototype, REMOTE_METHOD_DESCRIPTOR, {
         version: 1,
         methods: Object.freeze([
             Object.freeze({ method: "sessions", invocation: Object.freeze({ kind: "direct" }) }),
-            Object.freeze({ method: "stats", invocation: Object.freeze({ kind: "direct" }) }),
-            Object.freeze({ method: "killJob", invocation: Object.freeze({ kind: "direct" }) })
+            Object.freeze({ method: "stats", invocation: Object.freeze({ kind: "direct" }) })
         ])
     })
 });

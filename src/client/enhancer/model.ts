@@ -72,8 +72,9 @@ function readText(el: any): string | null {
  * overwrite and recaptured whenever React rewrites it behind our back, so a
  * later restore puts back exactly what the shell rendered. `stock` is the
  * expected shell value (the bare model name); we only rewrite while the live
- * DOM carries that stock value — React may own a value of its own (an Effort
- * label), which must never be touched.
+ * DOM carries a stock rendering of that value — the bare name, or the shell's
+ * own `provider/model` pairing (below) — so a value React owns for its own
+ * reason (an Effort label) is never touched.
  */
 export function writeModelText(env: any, el: any, text: string, stock: string): boolean {
     if (!el || el.nodeType !== 1 || !el.isConnected) return false;
@@ -82,8 +83,8 @@ export function writeModelText(env: any, el: any, text: string, stock: string): 
     if (dom === text) return true;
     var entry = env.modelTexts.get(el);
     if (!entry) {
-        // First touch: only ours if the live value is the stock one.
-        if (dom !== stock) return false;
+        // First touch: only ours if the live value is a stock rendering.
+        if (!isStockModelValue(dom, stock)) return false;
         entry = { applied: null, original: dom };
         env.modelTexts.set(el, entry as ModelTitleState);
     }
@@ -92,8 +93,8 @@ export function writeModelText(env: any, el: any, text: string, stock: string): 
         entry.original = dom;
         entry.applied = null;
     }
-    if (entry.applied === null && dom !== stock) {
-        // A live value that is neither ours nor the stock — leave it.
+    if (entry.applied === null && !isStockModelValue(dom, stock)) {
+        // A live value that is neither ours nor a stock rendering — leave it.
         return false;
     }
     try {
@@ -103,6 +104,19 @@ export function writeModelText(env: any, el: any, text: string, stock: string): 
         return false;
     }
     return true;
+}
+
+/**
+ * Whether `dom` is a stock rendering of the selected model. The shell may
+ * render the bare model name, or pair the provider with it (`provider/model`)
+ * — both are the shell's own value and fair to overwrite. Anything that does
+ * NOT mention the model (an Effort row's `Medium`) is never ours to touch.
+ */
+function isStockModelValue(dom: any, stock: string): boolean {
+    if (typeof dom !== "string") return false;
+    if (dom === stock) return true;
+    if (typeof stock !== "string" || stock === "") return false;
+    return dom.indexOf("/") >= 0 && dom.indexOf(stock) >= 0;
 }
 
 /** Restore one value span's stock text and forget it. */
@@ -120,7 +134,7 @@ export function restoreModelText(env: any, el: any): void {
     env.modelTexts.delete(el);
 }
 
-/** Restore every managed value span (feature off, master off, or dispose). */
+/** Restore every managed value span (feature off, or dispose). */
 export function restoreAllModelTexts(env: any): void {
     env.modelTexts.forEach(function (_entry: ModelTitleState, el: any) {
         restoreModelText(env, el);
@@ -407,7 +421,7 @@ export function restoreModelTitle(env: any, el: any, entry: ModelTitleState | un
     env.modelTitles.delete(el);
 }
 
-/** Restore every managed element (feature off, master off, or dispose). */
+/** Restore every managed element (feature off, or dispose). */
 export function restoreAllModelTitles(env: any): void {
     env.modelTitles.forEach(function (entry: ModelTitleState, el: any) {
         try {
@@ -442,13 +456,26 @@ export function writeModelTitle(env: any, el: any, title: string): void {
     }
 }
 
-/** Subscribe every live anchor's directory store; forget the anchors that left. */
+/**
+ * Subscribe every live anchor's directory store; forget the anchors that left.
+ *
+ * The anchor a pass holds is the seat's `data-slot` element — and that
+ * element's OWN fiber chain never reaches the `ModelSelect` component carrying
+ * the store, because `ModelSelect` renders *inside* the seat, not above it.
+ * Reading the store off the anchor therefore answered nothing live (no
+ * subscription was ever registered, and a selection change had no trigger to
+ * ride). The trigger inside the seat is the anchor whose chain does reach it,
+ * so it is tried first, with the seat itself kept only as the fallback shape.
+ */
 function syncModelStoreSubscriptions(env: any, seats: any[]): void {
     for (var s = 0; s < seats.length; s++) {
         var anchor = seats[s];
         if (!anchor || !anchor.isConnected) continue;
         if (env.modelSubs.has(anchor)) continue;
-        var store = findModelDirectoryStore(anchor);
+        var store: any = null;
+        var trigger = findAllWhere(anchor, 1200, isModelTrigger)[0];
+        if (trigger) store = findModelDirectoryStore(trigger);
+        if (store === null) store = findModelDirectoryStore(anchor);
         if (store === null || typeof store.subscribe !== "function") continue;
         try {
             var off = store.subscribe(function () {
@@ -469,7 +496,7 @@ function syncModelStoreSubscriptions(env: any, seats: any[]): void {
     });
 }
 
-/** Forget every store subscription (off / master-off / dispose). */
+/** Forget every store subscription (feature off / dispose). */
 export function clearModelStoreSubscriptions(env: any): void {
     env.modelSubs.forEach(function (unsubscribe: any, anchor: any) {
         try {
@@ -481,13 +508,12 @@ export function clearModelStoreSubscriptions(env: any): void {
 
 /**
  * One resync of the whole surface: while enabled every live seat trigger /
- * menu cell carries `provider > model`; while off (or master-off) every
- * managed element is restored to its stock `title` and every subscription
- * dropped. Elements that left the DOM or the surface (a closed menu's cells)
+ * menu cell carries `provider > model`; while off every managed element is
+ * restored to its stock `title` and every subscription dropped. Elements that left the DOM or the surface (a closed menu's cells)
  * are restored and forgotten.
  */
 export function syncModelSelectors(env: any): void {
-    if (!env.active || !env.modelProviderEnabled) {
+    if (!env.modelProviderEnabled) {
         clearModelStoreSubscriptions(env);
         restoreAllModelTitles(env);
         restoreAllModelTexts(env);

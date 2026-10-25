@@ -1,6 +1,7 @@
 # Dev
 .probe/
 _reference/
+.chrome
 
 # Dependencies
 node_modules/

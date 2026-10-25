@@ -33,7 +33,8 @@ export function syncCard(env: any, state: any): void {
         var cardEl = state.cardEl;
         if (!cardEl.isConnected) return;
 
-        // Re-build the time+bar wrapper when it was removed.
+        // Re-build the time+bar wrapper when it was removed — an injection the
+        // shell swept away (React's "Copied" re-render) is what re-seats it.
         if (!state.twrap) {
             rebuildTimeWrap(env, state, cardEl);
         } else if (!cardEl.contains(state.twrap)) {
@@ -134,11 +135,27 @@ export function rebuildTimeWrap(env: any, state: any, cardEl: any): void {
     }
     var statusTitle = statusLabels.join(" · ");
 
+    // Remember what the fold removes: `stripCard` re-seats exactly these lines
+    // at their original stack positions, so handing the card back returns it
+    // to the shell rather than leaving a half-restructured DOM.
+    state.stripped = false;
+    // `lines` is the pristine stack in order, so its own indices are the
+    // positions `stripCard` re-seats these lines back into.
+    var stockLines: any[] = [];
+    if (timeEl) stockLines.push({ node: timeEl, index: timeAt });
+    for (var li = statusStart; li < lines.length; li++) {
+        if (!lines[li].querySelector) continue;
+        if (!(lines[li].querySelector("[data-state]") || lines[li].querySelector("svg"))) continue;
+        stockLines.push({ node: lines[li], index: li });
+    }
+    state.stockLines = stockLines;
+
     // The title line is the first stock line — unless the relative-time probe
     // landed on index 0, which means this card has no title line and lines[0]
     // is the line about to be replaced.
     var titleEl = timeAt === 0 ? null : lines[0] || null;
     if (titleEl) titleEl.dataset.hiTitle = "1";
+    state.titleEl = titleEl;
 
     var twrap = doc.createElement("div");
     twrap.className = "dhi-twrap";
@@ -199,7 +216,16 @@ export function enhanceCard(env: any, cardEl: any): boolean {
     var bar = doc.createElement("div");
     bar.className = "dhi-bar";
     bar.setAttribute("data-hi", "1");
-    var state: any = { cardEl: cardEl, bar: bar, twrap: null, metrics: null, signature: "", sessionId: info.id, timers: [], observer: null, syncing: false, swallow: null };
+    var state: any = {
+        cardEl: cardEl, bar: bar, twrap: null, metrics: null, signature: "", sessionId: info.id,
+        timers: [], observer: null, syncing: false, swallow: null,
+        // What `stripCard` hands back when this mount ends — the off half the
+        // Plugins page answers by disabling the bundle row (docs/PLAN.md §40).
+        stockLines: [], stockRole: cardEl.getAttribute("role"),
+        stockTabindex: cardEl.hasAttribute("tabindex") ? cardEl.getAttribute("tabindex") : null,
+        stockCursor: cardEl.style.cursor, stripped: false, attached: false
+    };
+
     var entries = [
         { kind: "id", value: String(info.id), label: translateSelf(env, "copySessionId") },
         ...(info.cwd ? [{ kind: "path", value: String(info.cwd), label: translateSelf(env, "copyWorkspacePath") }] : [])
@@ -211,12 +237,13 @@ export function enhanceCard(env: any, cardEl: any): boolean {
 
     // Neutralize the stock whole-card copy: the card is the whole copy
     // surface (`role="button"` + click → copyText), which the corner icons
-    // now replace.
-    state.swallow = function (event: any) {
-        event.stopPropagation();
-    };
-    cardEl.addEventListener("click", state.swallow, false);
-    cardEl.addEventListener("keydown", state.swallow, false);
+    // now replace. Attached per card, and dropped again by `stripCard`.
+    if (!state.swallow) {
+        state.swallow = function (event: any) {
+            event.stopPropagation();
+        };
+    }
+    attachSwallow(cardEl, state);
 
     // Re-apply: React's "Copied" re-render sweeps the injected nodes; the
     // observer re-syncs while the card stays open.
@@ -242,5 +269,91 @@ export function cleanupCard(env: any, cardEl: any): void {
     for (var i = 0; i < state.timers.length; i++) env.win.clearTimeout(state.timers[i]);
     state.timers.length = 0;
     env.cards.delete(cardEl);
-    if (env.cards.size === 0 && env.previews.size === 0) env.stopSweep();
+    if (env.cards.size === 0) env.stopSweep();
+}
+
+/**
+ * Return one already-open card to its stock shape — what the plugin's end does
+ * (the enhancer is unmounted when the bundle row is disabled; PLAN §40). The
+ * injected nodes go, the stock lines `rebuildTimeWrap` folded in go back at
+ * their original stack positions, the title marker goes, and the whole-card
+ * copy surface is handed back to the shell.
+ *
+ * Diff-only: a card that is already stock (never enhanced, or already
+ * stripped) is a no-op, so the hand-back costs nothing. A card whose DOM React
+ * rebuilt in the meantime is answered by the rebuild paths — re-inserting a
+ * line the shell already re-rendered would duplicate it.
+ */
+export function stripCard(env: any, state: any): void {
+    if (!state || state.stripped) return;
+    var cardEl = state.cardEl;
+    if (cardEl && cardEl.isConnected) {
+        var stack = cardEl.firstElementChild;
+        if (stack) {
+            // Every injected stack child goes first, so the stock positions
+            // below read the pristine child list.
+            for (var i = stack.children.length - 1; i >= 0; i--) {
+                var injected = stack.children[i];
+                if (injected.classList && (injected.classList.contains("dhi-twrap") || injected.classList.contains("dhi-bar") || injected.classList.contains("dhi-metrics"))) {
+                    stack.removeChild(injected);
+                }
+            }
+            var stockLines = state.stockLines || [];
+            if (stockLines.length > 0) {
+                // Lines the shell already renders (React rebuilt them behind
+                // us) are never re-seated — that would duplicate them.
+                var present: string[] = [];
+                for (var p = 0; p < stack.children.length; p++) {
+                    var presentText = (stack.children[p].textContent || "").trim();
+                    if (presentText) present.push(presentText);
+                }
+                for (var j = 0; j < stockLines.length; j++) {
+                    var entry = stockLines[j];
+                    if (!entry || !entry.node) continue;
+                    if (entry.node.isConnected && stack.contains(entry.node)) continue;
+                    var ownText = (entry.node.textContent || "").trim();
+                    if (ownText && present.indexOf(ownText) >= 0) continue;
+                    var ref = stack.children[Math.min(entry.index, stack.children.length)] || null;
+                    try {
+                        stack.insertBefore(entry.node, ref);
+                    } catch (error) {}
+                }
+            }
+        }
+        state.metrics = null;
+        state.twrap = null;
+        state.signature = "";
+        if (state.titleEl) {
+            try {
+                if (state.titleEl.hasAttribute && state.titleEl.hasAttribute("data-hi-title")) state.titleEl.removeAttribute("data-hi-title");
+            } catch (error) {}
+        }
+        cardEl.removeAttribute("data-hi-session");
+        // The card is again the shell's own copy surface.
+        if (state.stockRole !== null && !cardEl.getAttribute("role")) cardEl.setAttribute("role", state.stockRole);
+        if (state.stockTabindex !== null && !cardEl.hasAttribute("tabindex")) cardEl.setAttribute("tabindex", state.stockTabindex);
+        cardEl.style.cursor = state.stockCursor || "";
+    }
+    state.stripped = true;
+    state.stockLines = [];
+    state.titleEl = null;
+    detachSwallow(cardEl, state);
+}
+
+/** The per-card copy neutralizer, attached exactly once. */
+function attachSwallow(cardEl: any, state: any): void {
+    if (state.attached) return;
+    cardEl.addEventListener("click", state.swallow, false);
+    cardEl.addEventListener("keydown", state.swallow, false);
+    state.attached = true;
+}
+
+/** Hand the whole-card copy path back to the shell. */
+function detachSwallow(cardEl: any, state: any): void {
+    if (!state.attached) return;
+    state.attached = false;
+    try {
+        cardEl.removeEventListener("click", state.swallow, false);
+        cardEl.removeEventListener("keydown", state.swallow, false);
+    } catch (error) {}
 }

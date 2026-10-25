@@ -3,9 +3,9 @@
  *
  * Everything the enhancer reads lives behind `ctx`: the browser `sessions`
  * store (identity + the `hoverInfo` projection hint), the `connection` (the
- * RPC envelope the stats/file fetches ride), and `locale` (copy). Every path
- * is fail-open: a missing store, locale or transport returns nothing rather
- * than throwing into the DOM walk.
+ * RPC envelope the stats fetch rides), and `locale` (copy). Every path is
+ * fail-open: a missing store, locale or transport returns nothing rather than
+ * throwing into the DOM walk.
  */
 import { LOCALE_NAMESPACE, WORKSPACE_NAMESPACE } from "../plugin-meta.js";
 

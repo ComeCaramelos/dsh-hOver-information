@@ -32,22 +32,6 @@ export interface CardState {
     swallow: ((event: any) => void) | null;
 }
 
-/** Per-preview state, keyed by the live preview root (env's `previews`). */
-export interface PreviewState {
-    /** The live preview root element (the observer's target). */
-    rootEl: any;
-    /** The current path element (re-resolved on every sync). */
-    pathEl: any;
-    /** The injected tools bar. */
-    bar: any;
-    /** Copy-feedback timers. */
-    timers: number[];
-    /** The per-preview MutationObserver. */
-    observer: MutationObserver | null;
-    /** Re-entrancy guard for `syncPreview`. */
-    syncing: boolean;
-}
-
 /** One session's live-stats cache entry (env's `statsCache`). */
 export interface StatsEntry {
     /** Timestamp of the last settled fetch attempt. */
@@ -61,11 +45,10 @@ export interface StatsEntry {
 }
 
 /**
- * The per-mount enhancer context. `active`/`refreshMs` mutate from the scope
- * subscription; `startSweep`/`stopSweep`/`refreshAllCards` are wired by the
- * mount (index.ts) before any component runs.
+ * The per-mount enhancer context. `refreshMs` and the metric enablement mutate
+ * from the scope subscription; `startSweep`/`stopSweep`/`refreshAllCards` are
+ * wired by the mount (index.ts) before any component runs.
  */
-import type { JobMenuState } from "./jobs.js";
 export interface EnhancerEnv {
     doc: any;
     win: any;
@@ -73,22 +56,12 @@ export interface EnhancerEnv {
     ctx: any;
     /** Per-card state keyed by the live card element. */
     cards: Map<any, CardState>;
-    /** Per-preview state keyed by the live preview root element. */
-    previews: Map<any, PreviewState>;
-    /** Per-menu state keyed by the live background-job `ul` element. */
-    jobMenus: Map<any, JobMenuState>;
     /** Per-session stats cache. */
     statsCache: Map<string, StatsEntry>;
     /** Settings-driven row enablement, keyed by METRICS field. */
     metricEnabled: Record<string, boolean>;
-    /** Master switch from the scope (default true). */
-    active: boolean;
-    /** Sidebar-preview-tools switch from the scope (default true). */
-    previewToolsEnabled: boolean;
     /** Composer model-selector provider switch from the scope (default true). */
     modelProviderEnabled: boolean;
-    /** Background-job kill buttons from the scope (default true). */
-    jobKillEnabled: boolean;
     /** Model-selector `title` state we own, keyed by the live DOM node. */
     modelTitles: Map<any, { applied: string | null; original: string | null }>;
     /** Model-selector cell `cellValue` displayed-text state we own, keyed by

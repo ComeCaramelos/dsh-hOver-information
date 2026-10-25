@@ -1,14 +1,23 @@
 # @comecaramelos/dsh-hover-information — bundle patch.
 #
-# Host plane: registers the `hover-info` settings namespace whose
-# `active` flag gates the browser enhancer (`src/client.ts` →
-# `lib/client.js`). The same plugin row also mounts the `hoverInfo`
-# projection unit (`src/unit.ts`) and the `hoverInfo` Typert remote
-# (`src/remote.ts`) from its `apply`, so no further patch lines are needed
-# for them (docs/PLAN.md §5.3).
+# Host plane: one profile entry row named after the plugin's own id.
+# `id: hover-info` is not decoration — it is the key every part of the
+# configuration surface resolves by: the host form attaches the entry by this
+# row's id (not a bundle id), and the browser reads and writes the entry's
+# configuration form through the very same id. The row also mounts the
+# `hoverInfo` projection unit and the `hoverInfo` Typert remote from its
+# `apply`, so no further patch lines are needed for them (docs/PLAN.md §36).
+#
+# Deliberately NO `config:` block here. Every field answers its own default in
+# the Config schema, and the row's `config:` is the layer the Host answers as
+# the document's OWN base — so whatever is declared here is what a later form
+# write re-materialises as a user-layer value. Pinning `active: true` here was
+# measured (when that field still existed — the master switch is gone since
+# docs/PLAN.md §40) to make that switch come back Overridden after one unrelated
+# toggle: the write answered `{active: true, showToolCalls: true}` for a single
+# `showToolCalls` op. What the row needs is its id and name; the defaults come
+# from the schema, and the user layer then says only what the user actually
+# changed (docs/PLAN.md §36).
 - insert:
     - id: hover-info
       name: "@comecaramelos/dsh-hover-information"
-      config:
-        # Base layer for the settings namespace; user edits resolve above it.
-        active: true

@@ -3,8 +3,8 @@
  *
  * Clipboard first, execCommand textarea fallback, and every failure resolves
  * `false` — a failed copy shows no feedback and leaves the target element
- * untouched (fail-open). The button itself is built by the hover-card and
- * preview components; feedback state (`timers`) belongs to the card.
+ * untouched (fail-open). The button itself is built by the hover-card
+ * component; feedback state (`timers`) belongs to the card.
  */
 import { COPY_FEEDBACK_MS } from "../constants.js";
 import { ICONS } from "./icons.js";
@@ -52,30 +52,23 @@ function legacyCopy(env: { doc: any }, text: string): boolean {
  * One injected copy button.
  *
  * `entry` fields:
- *  - `kind`   : the value stamped on the attribute (stable
- *    for tests / re-enumeration);
- *  - `icon`   : key into `ICONS` to restore after feedback
- *    (defaults to `kind`);
- *  - `className`: chrome class (defaults to the hover-card
- *    button class; the preview passes the header-tool one);
- *  - `attr`   : attribute name (defaults to `data-hi-copy`);
- *  - `label`  : `aria-label`/`title` already localized;
- *  - `value`  : a string, OR
- *  - `get`    : `function () → string | Promise<string>`
- *    (the preview resolves its source lazily; the hover card
- *    always passes a ready `value`).
+ *  - `kind` : the value stamped on the `data-hi-copy` attribute (stable
+ *    for tests / re-enumeration) and the `ICONS` key to restore after
+ *    feedback;
+ *  - `label`: `aria-label`/`title` already localized (falls open to the
+ *    dictionary string keyed by `kind`);
+ *  - `value`: the string to copy (the card always hands a ready value).
  */
 export function makeButton(
     env: { doc: any; win: any; ctx: any },
-    entry: { kind: string; icon?: string; className?: string; attr?: string; label?: string; value?: string; get?: () => any },
+    entry: { kind: string; label?: string; value?: string; get?: () => any },
     state: { timers: number[] }
 ): any {
-    var className = typeof entry.className === "string" ? entry.className : "dhi-btn";
-    var attr = typeof entry.attr === "string" ? entry.attr : "data-hi-copy";
-    var icon = typeof entry.icon === "string" ? entry.icon : entry.kind;
+    var attr = "data-hi-copy";
+    var icon = entry.kind;
     var button = env.doc.createElement("button");
     button.type = "button";
-    button.className = className;
+    button.className = "dhi-btn";
     button.setAttribute(attr, entry.kind);
     var label = typeof entry.label === "string" ? entry.label : translateSelf(env, entry.kind);
     button.title = label;

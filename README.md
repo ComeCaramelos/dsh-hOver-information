@@ -4,7 +4,9 @@ Aditional info in web UI.
 
 **Preview card**
 
-Configurable metrics block, all gated by a Settings → Plugins card:
+Configurable metrics block, configured on this bundle's own configuration page
+on the Plugins page (turning the bundle row off is what disables the whole
+enhancement):
 
 ![Preview card panel](assets/preview_panel.png)
 
@@ -14,16 +16,6 @@ Configurable metrics block, all gated by a Settings → Plugins card:
 - **Metrics block**: turns, steps, tokens sent/received, cache tokens,
   compactions, purges (tool-result prunes), context window, subagents, model,
   tool calls, active time and created date — toggled per metric.
-
-**Sidebar**
-
-- **Document-preview header tools**: the sidebar's open-file panel grows two
-  additional copy buttons: file content and file path.
-
-**Background jobs**
-
-- **Kill button on live jobs**: a ✕ on each running row in the session
-  header's background-job list (cancel, not force).
 
 **Model selector**
 
@@ -38,15 +30,9 @@ From npm:
 dsh plugin --profile web add @comecaramelos/dsh-hover-information
 ```
 
-Manual install:
-
-```sh
-mkdir -p ~/.dsh/profiles/web/node_modules/@comecaramelos
-ln -s /path/to/dsh-hover-information \
-  ~/.dsh/profiles/web/node_modules/@comecaramelos/dsh-hover-information
-```
-
-and add this to `~/.dsh/profiles/web/package.json`:
+Manual install — the live profile installs the **published** package, so it is
+just a manifest entry (materialized by `pnpm install` inside the profile; no
+`link:`, no symlink there):
 
 ```json
 {
@@ -69,6 +55,10 @@ Then restart the `web` host — browser bundles don't hot-update, and
 the live `dsh web` gateway is never restarted by tooling.
 
 ## Develop
+
+The row card is built on the shared base layer
+[`@comecaramelos/dsh-ancesters`](https://github.com/ComeCaramelos/dsh-ancesters),
+linked as a sibling checkout (`file:../dsh-ancesters`) — build it first.
 
 ```sh
 npm install

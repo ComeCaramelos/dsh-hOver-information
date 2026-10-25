@@ -43,30 +43,3 @@ export function findFiberSessionId(cardEl: any): string | undefined {
     }
     return void 0;
 }
-
-/**
- * Fiber fast-path: the body renderer's `content` prop — the source the lines
- * are built from. Bounded like the card's session-id walk (docs/PLAN.md
- * §6.2).
- * @returns `{ text, eof }`, or null for no text view.
- */
-export function findPreviewContent(rootEl: any): { text: string; eof: boolean } | null {
-    var fiber = fiberOf(rootEl);
-    if (!fiber) return null;
-    var queue = [fiber];
-    var visited = 0;
-    while (queue.length > 0 && visited < 400) {
-        var node = queue.shift();
-        visited += 1;
-        var props = node.memoizedProps;
-        if (props && typeof props === "object") {
-            var content = props.content;
-            if (content && typeof content === "object" && content.kind === "text" && typeof content.text === "string") {
-                return { text: content.text, eof: content.eof === true };
-            }
-        }
-        if (node.child) queue.push(node.child);
-        if (node.sibling) queue.push(node.sibling);
-    }
-    return null;
-}
