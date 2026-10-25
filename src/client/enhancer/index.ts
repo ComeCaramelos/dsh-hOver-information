@@ -2,24 +2,24 @@
  * Browser half — the enhancer mount.
  *
  * Watches `document.body` for the stock session hover-card portal (structural
- * fingerprint — see ./detect.ts), enhances it (./hover-card.ts), watches for
- * the stock document-preview root (see ./preview.ts), and drives both through
- * one lazy sweep: the heartbeat starts with the first open card/preview and
- * stops with the last (docs/ROADMAP.md Fase 2b), so an idle tab keeps no
- * wakeups.
+ * fingerprint — see ./detect.ts), enhances it (./hover-card.ts), and drives the
+ * whole surface through one lazy sweep: the heartbeat starts with the first open
+ * card and stops with the last (docs/ROADMAP.md Fase 2b), so an idle tab keeps
+ * no wakeups.
+ *
+ * The composer model-selector surface (./model.ts) is also driven from here: it
+ * rides its own DOM records plus the live directory-store subscription, with
+ * the sweep heartbeat standing behind it as the DOM-source backstop.
  *
  * This is also the only module that owns the per-mount state: `env` is handed
  * to every component call and is built here, once, per `apply`.
  */
 import { DEFAULT_REFRESH_MS, MODEL_SEAT_ATTR, SWEEP_INTERVAL_MS } from "../constants.js";
-import { PREVIEW_PATH_ATTR, PREVIEW_ROOT_ATTR } from "../constants.js";
 import { METRICS } from "../metrics.js";
-import { SETTINGS_NAMESPACE } from "../plugin-meta.js";
+import { ENTRY_ID } from "../plugin-meta.js";
 import { isHoverCard } from "./detect.js";
-import { cleanupCard, enhanceCard, syncCard } from "./hover-card.js";
+import { cleanupCard, enhanceCard, stripCard, syncCard } from "./hover-card.js";
 import { clearModelStoreSubscriptions, mentionsModelSurface, modelSurfaceMentionsIn, restoreAllModelTexts, restoreAllModelTitles, syncModelSelectors } from "./model.js";
-import { cleanupPreview, enhancePreview, findByAttributeIn, previewRootOf, syncPreview } from "./preview.js";
-import { cleanupAllJobMenus, cleanupJobMenu, enhanceJobMenu, findJobMenusIn, isJobMenu, jobMenuLabel, mentionsJobMenu, syncJobMenu } from "./jobs.js";
 import { injectHoverCss } from "../styles/index.js";
 import type { EnhancerEnv } from "./env.js";
 
@@ -32,10 +32,6 @@ export function applyEnhancer(ctx: any): () => void {
 
         /** Live card elements → their state; every DOM node we own hangs here. */
         const cards: EnhancerEnv["cards"] = new Map();
-        /** Preview root elements → their state. */
-        const previews: EnhancerEnv["previews"] = new Map();
-        /** Background-job menu elements → their state (open `ul` menus). */
-        const jobMenus: EnhancerEnv["jobMenus"] = new Map();
         /** Session id → the last live-stats view + freshness. */
         const statsCache: EnhancerEnv["statsCache"] = new Map();
         const metricEnabled: Record<string, boolean> = {};
@@ -46,14 +42,9 @@ export function applyEnhancer(ctx: any): () => void {
             win,
             ctx,
             cards,
-            previews,
-            jobMenus,
             statsCache,
             metricEnabled,
-            active: true,
-            previewToolsEnabled: true,
             modelProviderEnabled: true,
-            jobKillEnabled: true,
             modelTitles: new Map(),
             modelTexts: new Map(),
             modelSubs: new Map(),
@@ -64,18 +55,17 @@ export function applyEnhancer(ctx: any): () => void {
             refreshAllCards: () => refreshAllCards()
         };
 
-        /** Settings-scoped: master switch, preview-tools switch, refreshMs, row enablement. */
+        /** The row configuration: refreshMs, row enablement — read off the
+         * row's configuration form, the same source the configuration page
+         * writes through (dsh 0.2.0 has no scope binding). */
         let unsubscribeScope = noop;
         try {
-            const scope = ctx.settingsScope.bind({ namespace: SETTINGS_NAMESPACE });
+            const form = ctx.configForms.get(ENTRY_ID);
             const readScope = function () {
-                const snapshot = scope.getSnapshot();
+                const snapshot = form.getSnapshot();
                 if (snapshot && snapshot.status === "ready" && snapshot.value) {
                     const value = snapshot.value;
-                    if (value.active !== void 0) env.active = value.active !== false;
-                    if (value.showPreviewTools !== void 0) env.previewToolsEnabled = value.showPreviewTools !== false;
                     if (value.showModelProvider !== void 0) env.modelProviderEnabled = value.showModelProvider !== false;
-                    if (value.showJobKill !== void 0) env.jobKillEnabled = value.showJobKill !== false;
                     const ms = Number(value.refreshMs);
                     env.refreshMs = Number.isFinite(ms) && ms >= 1000 && ms <= 60000 ? ms : DEFAULT_REFRESH_MS;
                     for (let k = 0; k < METRICS.length; k++) {
@@ -84,32 +74,16 @@ export function applyEnhancer(ctx: any): () => void {
                     }
                 }
                 refreshAllCards();
-                // The preview-tools switch toggles live: every open preview
-                // re-syncs immediately — the diff-only resync detaches the bar
-                // while off and re-seats it once re-enabled.
-                previews.forEach(function (state) {
-                    try {
-                        syncPreview(env, state);
-                    } catch (error) {}
-                });
-                // The model-provider switch toggles live too: off restores the
+                // The model-provider switch toggles live: off restores the
                 // whole selector surface, on re-seats every title.
                 try {
                     syncModelSelectors(env);
                 } catch (error) {}
-                // The background-job kill switch is live as well: off strips
-                // every mounted menu's buttons, on re-seats them.
-                jobMenus.forEach(function (state) {
-                    try {
-                        syncJobMenu(env, state);
-                    } catch (error) {}
-                });
             };
-            unsubscribeScope = scope.subscribe(readScope) || noop;
+            unsubscribeScope = form.subscribe(readScope) || noop;
             readScope();
         } catch (error) {
-            env.active = true;
-            env.previewToolsEnabled = true;
+            env.modelProviderEnabled = true;
         }
 
         const disposeCss = injectHoverCss(doc);
@@ -122,44 +96,36 @@ export function applyEnhancer(ctx: any): () => void {
             });
         }
 
-        // The heartbeat exists only while at least one card/preview/menu is
-        // open; the handle is unref'd so a forgotten `dispose` in tests can
-        // never hold the process alive (`unref` exists only in Node; browser
-        // handles are numbers, hence the structural check).
+        // The heartbeat exists only while at least one card is open; the
+        // handle is unref'd so a forgotten `dispose` in tests can never hold
+        // the process alive (`unref` exists only in Node; browser handles are
+        // numbers, hence the structural check).
         let sweepTimer: any = null;
 
         function sweepTick(): void {
             try {
-                if (cards.size === 0 && previews.size === 0 && jobMenus.size === 0) {
+                if (cards.size === 0) {
                     stopSweep();
                     return;
                 }
-                if (!env.active) return;
+                // The heartbeat only runs while a card is open: a detached
+                // card loses its state, a live one re-syncs (the diff-guarded
+                // path costs nothing when nothing moved).
                 cards.forEach(function (state) {
                     if (!state.cardEl.isConnected) cleanupCard(env, state.cardEl);
                     else syncCard(env, state);
-                });
-                previews.forEach(function (state, rootEl) {
-                    if (!rootEl.isConnected) cleanupPreview(env, rootEl);
-                    else syncPreview(env, state);
-                });
-                // Menu backstop: the per-menu observer carries React's churn;
-                // this one catches a detached root a record never reported.
-                jobMenus.forEach(function (state, ulEl) {
-                    if (!ulEl.isConnected) cleanupJobMenu(env, ulEl, state);
-                    else syncJobMenu(env, state);
                 });
                 // Selector backstop: the DOM-source resolution (an open
                 // model-list's checked option) has no subscription to ride.
                 try {
                     syncModelSelectors(env);
                 } catch (error) {}
-                if (cards.size === 0 && previews.size === 0 && jobMenus.size === 0) stopSweep();
+                if (cards.size === 0) stopSweep();
             } catch (error) {}
         }
 
         function startSweep(): void {
-            if (sweepTimer !== null || (cards.size === 0 && previews.size === 0 && jobMenus.size === 0)) return;
+            if (sweepTimer !== null || cards.size === 0) return;
             sweepTimer = win.setInterval(sweepTick, SWEEP_INTERVAL_MS);
             if (sweepTimer !== null && typeof sweepTimer.unref === "function") sweepTimer.unref();
         }
@@ -175,15 +141,14 @@ export function applyEnhancer(ctx: any): () => void {
 
         const bodyObserver = new win.MutationObserver(function (records) {
             try {
-                if (!env.active) return;
                 for (let r = 0; r < records.length; r++) {
                     const record = records[r] as any;
                     // Records may carry only one kind; tolerate the others
                     // (attribute records arrive here in the DOM stub, never in
-                    // browsers).
+                    // browsers). A removed card loses its state whatever the
+                    // record carried it under.
                     const removedNodes = record.removedNodes || [];
                     for (let removed = 0; removed < removedNodes.length; removed++) cleanupCard(env, removedNodes[removed]);
-                    if (!env.active) return;
                     const addedNodes = record.addedNodes || [];
                     for (let added = 0; added < addedNodes.length; added++) {
                         const node = addedNodes[added];
@@ -197,62 +162,6 @@ export function applyEnhancer(ctx: any): () => void {
             }
         });
         bodyObserver.observe(doc.body, { childList: true });
-
-        // Preview discovery. A file opening MOUNTS the preview DOM somewhere
-        // inside the body subtree — and its anchor attributes arrive *with*
-        // the elements they are stamped on, so an attribute record can never
-        // fire for a fresh mount; childList records catch the mount, and
-        // attribute records stay for a re-keyed path element. Chat churn is
-        // kept cheap by scanning only added subtrees with a budget, after O(1)
-        // attribute probes.
-        const previewObserver = new win.MutationObserver(function (records) {
-            try {
-                if (!env.active) return;
-                for (let r = 0; r < records.length; r++) {
-                    const record = records[r] as any;
-                    if (!record) continue;
-                    let rootEl: any = null;
-                    if (record.type === "attributes") {
-                        const target = record.target as Element;
-                        if (!target || target.nodeType !== 1 || !target.isConnected) continue;
-                        if (!(target.hasAttribute && target.hasAttribute(PREVIEW_PATH_ATTR))) continue;
-                        rootEl = previewRootOf(target);
-                    } else {
-                        // childList (and the record kinds that do not carry
-                        // additions): DOM mutating *inside* an unregistered
-                        // root is where a toolless preview lives too (a
-                        // loaded-then-ready state, a swapped tab re-keying).
-                        let walker = record.target as Element;
-                        if (walker && walker.nodeType === 1 && walker.isConnected) {
-                            for (let hops = 0; walker && hops < 6; walker = walker.parentElement, hops++) {
-                                if (walker.hasAttribute && walker.hasAttribute(PREVIEW_ROOT_ATTR)) {
-                                    rootEl = walker;
-                                    break;
-                                }
-                            }
-                        }
-                        if (rootEl === null) {
-                            const addedNodes = record.addedNodes || [];
-                            const stop = Math.min(addedNodes.length, 16);
-                            for (let n = 0; n < stop && rootEl === null; n++) {
-                                const node = addedNodes[n];
-                                if (!node || node.nodeType !== 1) continue;
-                                if (node.hasAttribute && node.hasAttribute(PREVIEW_ROOT_ATTR)) rootEl = node;
-                                else if (node.hasAttribute && node.hasAttribute(PREVIEW_PATH_ATTR)) rootEl = previewRootOf(node);
-                                else rootEl = findByAttributeIn(node, PREVIEW_ROOT_ATTR, 64);
-                            }
-                        }
-                    }
-                    if (rootEl === null || !rootEl.isConnected || previews.has(rootEl)) continue;
-                    if (!enhancePreview(env, rootEl) && typeof console.debug === "function") {
-                        console.debug("hover-info: preview header incomplete (no path element)");
-                    }
-                }
-            } catch (error) {
-                console.warn("hover-info: preview enhance skipped:", error);
-            }
-        });
-        previewObserver.observe(doc.body, { childList: true, subtree: true, attributes: true, attributeFilter: [PREVIEW_PATH_ATTR] });
 
         // Model-selector discovery (docs/PLAN.md §33). The composer trigger
         // lives inside the named seat; the menu is a body-level portal, so
@@ -300,82 +209,18 @@ export function applyEnhancer(ctx: any): () => void {
             attributeFilter: ["title", "role", "aria-checked", MODEL_SEAT_ATTR]
         });
 
-        /** Added-subtree probe budget for the background-job discovery. */
-        const DISCOVERY_SCAN_BUDGET = 64;
-
-        // Background-job list discovery (docs/PLAN.md §34). The shell's
-        // `JobListAction` renders its menu as a fresh `ul` under the session
-        // header only while the trigger is OPEN, so a childList record is the
-        // whole discovery path — no attribute probe can see attributes that
-        // arrive with the element. A mention probe gates every record so the
-        // chat churn stays cheap; the menu is anchored by its localized
-        // `aria-label`, resolved from the SHELL's own `job` namespace (never
-        // the hash-prefixed row classes).
-        const jobsObserver = new win.MutationObserver(function (records) {
-            try {
-                if (!env.active || !env.jobKillEnabled) return;
-                const label = jobMenuLabel(env);
-                if (label === null) return;
-                for (let r = 0; r < records.length; r++) {
-                    const record = records[r] as any;
-                    if (!record) continue;
-                    const added = record.addedNodes || [];
-                    let found: any = null;
-                    for (let n = 0; n < added.length && found === null && n < 16; n++) {
-                        const node = added[n];
-                        if (!node || node.nodeType !== 1) continue;
-                        if (isJobMenu(node, label)) found = node;
-                        else if (mentionsJobMenu(node, label, DISCOVERY_SCAN_BUDGET)) {
-                            const hits: any[] = [];
-                            findJobMenusIn(node, hits, DISCOVERY_SCAN_BUDGET, label);
-                            found = hits.length > 0 ? hits[0] : null;
-                        }
-                    }
-                    if (found !== null && found.isConnected && !jobMenus.has(found)) {
-                        if (!enhanceJobMenu(env, found)) {
-                            if (typeof console.debug === "function") console.debug("hover-info: job menu not registered");
-                        }
-                    }
-                }
-            } catch (error) {
-                console.warn("hover-info: job menu enhance skipped:", error);
-            }
-        });
-        jobsObserver.observe(doc.body, { childList: true, subtree: true });
-
-        // A preview already open at mount time fired no records — one bounded
-        // scan catches the reloaded-session case.
-        const openPreview = findByAttributeIn(doc.body, PREVIEW_ROOT_ATTR, 40000);
-        if (openPreview !== null && env.active) enhancePreview(env, openPreview);
-        // Same for the composer: a conversation already open at mount time.
+        // A conversation already open at mount time fired no records — one
+        // sync pass catches the reloaded-session case.
         try {
             syncModelSelectors(env);
         } catch (error) {}
-        // And for an open background-job menu (a reloaded tab that kept it
-        // open): one bounded body scan registers the first live menu.
-        if (env.active && env.jobKillEnabled) {
-            const mountLabel = jobMenuLabel(env);
-            if (mountLabel !== null) {
-                const openMenus: any[] = [];
-                findJobMenusIn(doc.body, openMenus, 40000, mountLabel);
-                for (let m = 0; m < openMenus.length; m++) {
-                    if (openMenus[m].isConnected && !jobMenus.has(openMenus[m])) enhanceJobMenu(env, openMenus[m]);
-                }
-            }
-        }
 
         return function dispose(): void {
             try {
                 bodyObserver.disconnect();
             } catch (error) {}
             try {
-                previewObserver.disconnect();
-            } catch (error) {}
-            try {
                 modelObserver.disconnect();
-            } catch (error) {}
-            try {
-                jobsObserver.disconnect();
             } catch (error) {}
             try {
                 clearModelStoreSubscriptions(env);
@@ -393,14 +238,15 @@ export function applyEnhancer(ctx: any): () => void {
                 if (state.observer) state.observer.disconnect();
                 for (let i = 0; i < state.timers.length; i++) win.clearTimeout(state.timers[i]);
             });
-            cards.clear();
-            previews.forEach(function (state) {
-                if (state.observer) state.observer.disconnect();
-                for (let i = 0; i < state.timers.length; i++) win.clearTimeout(state.timers[i]);
+            // This mount is the only owner of what it injected, so its last
+            // act is handing every open card back to the shell. That is what
+            // "off" now means: not a switch inside the configuration, but the
+            // Plugins page disabling this bundle's own row (docs/PLAN.md §40)
+            // — which unmounts this half, so the stock card must survive it.
+            cards.forEach(function (state) {
+                if (state.cardEl.isConnected) stripCard(env, state);
             });
-            previews.clear();
-            cleanupAllJobMenus(env);
-            jobMenus.clear();
+            cards.clear();
             statsCache.clear();
             unsubscribeScope();
             disposeCss();

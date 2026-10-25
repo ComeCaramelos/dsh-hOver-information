@@ -288,12 +288,15 @@ export function createDom() {
 		},
 		createElement,
 		querySelector(selector) {
-			const match = /^style\[data-plugin-css="(.+)"\]$/.exec(selector);
-			if (match === null) return null;
-			for (const node of doc.head.children) {
-				if (node.tagName === "STYLE" && node.attributes.get("data-plugin-css") === match[1]) return node;
-			}
-			return null;
+			return doc.querySelectorAll(selector)[0] ?? null;
+		},
+		// Only the `style[data-*="…"]` lookups the injected sheets are found by:
+		// this half's own (`data-plugin-css`) and dsh-ancesters' shared sheet
+		// (`data-dsh-ancesters-css`).
+		querySelectorAll(selector) {
+			const match = /^style\[(data-[\w-]+)="(.+)"\]$/.exec(selector);
+			if (match === null) return [];
+			return doc.head.children.filter((node) => node.tagName === "STYLE" && node.attributes.get(match[1]) === match[2]);
 		}
 	};
 	doc.body.parentElement = null;
@@ -372,76 +375,10 @@ export function makeCard(dom, { title, time = "", statuses = ["Idle"] }) {
 	return card;
 }
 
-/**
- * A stock-shaped document preview: `div[data-document-preview] > header +
- * body`, mirroring `dsh-client-ui-sidebar-documentpreview`'s TextPreview
- * (path element with the absolute path in `title`, the viewer menu, a wrap
- * toggle and the reload tool). Returns the pieces the tests need.
- */
-export function makePreview(dom, { path = "/home/u/proj/AGENTS.md", title = "Markdown" } = {}) {
-	const doc = dom.doc;
-	const root = dom.createElement("div");
-	root.setAttribute("data-textpreview-state", "text");
-	root.setAttribute("data-textpreview-url", "file://" + path);
-	root.setAttribute("data-document-preview", "@deepseek-ai/dsh-client-ui-sidebar-documentpreview/code");
-	const header = dom.createElement("div");
-	const pathEl = dom.createElement("div");
-	pathEl.setAttribute("data-textpreview-path", "true");
-	pathEl.setAttribute("title", path);
-	const pathText = dom.createElement("span");
-	const directory = path.slice(0, Math.max(path.lastIndexOf("/") + 1, 0));
-	const name = path.slice(directory.length);
-	if (directory !== "") {
-		const directoryEl = dom.createElement("span");
-		directoryEl.textContent = directory;
-		pathText.appendChild(directoryEl);
-	}
-	const nameEl = dom.createElement("span");
-	nameEl.textContent = name;
-	pathText.appendChild(nameEl);
-	pathEl.appendChild(pathText);
-	header.appendChild(pathEl);
-	const menuWrap = dom.createElement("span");
-	const menu = dom.createElement("button");
-	menu.setAttribute("data-document-viewer-menu", "true");
-	menu.textContent = title;
-	menuWrap.appendChild(menu);
-	header.appendChild(menuWrap);
-	const reload = dom.createElement("button");
-	reload.setAttribute("data-textpreview-tool", "reload");
-	reload.innerHTML = '<svg width="16" height="16" viewBox="0 0 16 16"></svg>';
-	header.appendChild(reload);
-	root.appendChild(header);
-	const body = dom.createElement("div");
-	body.setAttribute("data-textpreview-body", "true");
-	root.appendChild(body);
-	return { root, header, pathEl, body, reload };
-}
-
-/**
- * The composer's stock model selector (docs/PLAN.md §33): the named seat
- * anchor (`div[data-slot="conversation.input.model"]`) with the
- * `button[class$="_trigger"]` inside it, whose `title` is the shell-composed
- * `model · effort`.
- *
- * - `withFiber` (default) stands the `ModelSelect` component fiber in on both
- *   the anchor and the trigger — its `directory` store answers
- *   `getSnapshot()` with `{ current: {provider, model}, groups }` and lets a
- *   test flip the selection through `store.set(next)`;
- * - `chain` (with `withFiber`) stands the fiber in the way the live React
- *   tree does: hop 0 carries only DOM props and `directory` lives on a
- *   component fiber up the `.return` chain — and the menu-cell fibers' return
- *   chains reach nothing carrying `directory` (the portal's real shape is
- * *why* the menu cells used to resolve only off the DOM source). This is the
- *   shape that reproduces the live bug; the fiber source on the seat's return
- *   chain still answers for the trigger.
- * - `withMenu` appends the body-portal root menu: the two
- *   `button[class$="_cell"][role="menuitem"]` cells; `openList` (default true)
- *   also mounts the model-list section with the checked option — the DOM
- *   source's only DOM-visible signal — while `openList: false` stands the
- *   common closed-list (root-pane) state with no DOM source at all.
- */
-export function makeModelSeat(dom, { provider = "openrouter", model = "gpt-4o-mini", providerName = "OpenRouter", modelName = "GPT-4o mini", effort = "Medium", withFiber = true, chain = false, withMenu = false, openList = true } = {}) {
+export function makeModelSeat(dom, { provider = "openrouter", model = "gpt-4o-mini", providerName = "OpenRouter", modelName = "GPT-4o mini", effort = "Medium", withFiber = true, chain = false, storeViaTrigger = false, withMenu = false, openList = true, pairValue = false } = {}) {
+	// Stock shape for the Model row's visible value: `pairValue` renders the
+	// shell's paired `provider/model` instead of the bare model name (the
+	// shape the live GUI answers with).
 	const doc = dom.doc;
 	const seat = dom.createElement("div");
 	seat.setAttribute("data-slot", "conversation.input.model");
@@ -474,8 +411,18 @@ export function makeModelSeat(dom, { provider = "openrouter", model = "gpt-4o-mi
 			// component fiber up the `.return` chain. Both the seat and the
 			// trigger reach the store through the chain (so the fiber source
 			// answers for them), exactly as a live composer does.
-			attachPropsFiber(seat, { "data-slot": "conversation.input.model" }, [{ memoizedProps: {} }, { memoizedProps: { directory: store } }]);
-			attachPropsFiber(trigger, { className: "_7KE1Ra_trigger", title: modelName + " · " + effort }, [{ memoizedProps: {} }, { memoizedProps: { directory: store } }]);
+			//
+			// `storeViaTrigger` answers the live GUI exactly: the `ModelSelect`
+			// component renders INSIDE the seat, so the seat's own return
+			// chain never reaches `directory` — only the trigger's does. A
+			// subscription read off the seat anchor answers nothing there.
+			if (storeViaTrigger) {
+				attachPropsFiber(seat, { "data-slot": "conversation.input.model" }, [{ memoizedProps: {} }, { memoizedProps: {} }]);
+				attachPropsFiber(trigger, { className: "_7KE1Ra_trigger", title: modelName + " · " + effort }, [{ memoizedProps: {} }, { memoizedProps: { directory: store } }]);
+			} else {
+				attachPropsFiber(seat, { "data-slot": "conversation.input.model" }, [{ memoizedProps: {} }, { memoizedProps: { directory: store } }]);
+				attachPropsFiber(trigger, { className: "_7KE1Ra_trigger", title: modelName + " · " + effort }, [{ memoizedProps: {} }, { memoizedProps: { directory: store } }]);
+			}
 		} else {
 			attachPropsFiber(seat, { directory: store });
 			attachPropsFiber(trigger, { directory: store });
@@ -498,7 +445,7 @@ export function makeModelSeat(dom, { provider = "openrouter", model = "gpt-4o-mi
 			cell.appendChild(labelEl);
 			const valueEl = dom.createElement("span");
 			valueEl.className = "_7KE1Ra_cellValue";
-			valueEl.textContent = label === "Model" ? modelName : "Medium";
+			valueEl.textContent = label === "Model" ? (pairValue ? providerName + "/" + modelName : modelName) : "Medium";
 			cell.appendChild(valueEl);
 			menu.appendChild(cell);
 			out.cells.push(cell);
@@ -540,44 +487,4 @@ export function makeModelSeat(dom, { provider = "openrouter", model = "gpt-4o-mi
 		out.menu = menu;
 	}
 	return out;
-}
-
-/**
- * A stock-shaped `JobListAction` menu: `div > ul[aria-label] > li` rows
- * shaped like the shell renders them (state dot + kind chip + label +
- * status + duration). Each row's fiber carries the React key the shell
- * gives rows (the background-job id), and `sessionId` rides an ancestor
- * fiber — the fast-path every identity resolution uses.
- *
- * Rows without their own `id` omit the fiber key (the shell's keys are
- * only an optimization there too).
- */
-export function makeJobMenu(dom, { rows = [], sessionId = undefined, ariaLabel = "Background jobs" } = {}) {
-	const doc = dom.doc;
-	const root = dom.createElement("div");
-	root.className = "_job_menuRoot";
-	const ul = dom.createElement("ul");
-	ul.setAttribute("aria-label", ariaLabel);
-	root.appendChild(ul);
-	for (const row of rows) {
-		const li = dom.createElement("li");
-		li.className = "_job_row" + (row.live === false ? " _job_rowSettled" : "");
-		const dot = dom.createElement("span");
-		dot.setAttribute("data-state", row.live === false ? "done" : row.status === "stopping" ? "warning" : "ongoing");
-		dot.style.width = "10px";
-		dot.style.height = "10px";
-		const kind = dom.createElement("span");
-		kind.textContent = "bash";
-		const label = dom.createElement("span");
-		label.textContent = row.label ?? "exec sleep 10";
-		const status = dom.createElement("span");
-		status.textContent = row.live === false ? "completed" : row.status === "stopping" ? "stopping" : "running";
-		const duration = dom.createElement("span");
-		duration.textContent = "1m 40s";
-		for (const span of [dot, kind, label, status, duration]) li.appendChild(span);
-		if (row.id !== undefined && row.id !== null) attachPropsFiber(li, { className: li.className }, undefined, row.id);
-		ul.appendChild(li);
-	}
-	if (sessionId !== undefined) attachPropsFiber(ul, { className: "_job_menu" }, [{ memoizedProps: {} }, { memoizedProps: { sessionId } }]);
-	return { root, ul };
 }

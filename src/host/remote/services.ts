@@ -35,16 +35,3 @@ export function projectionsOf(ctx: PluginContext): any {
         return void 0;
     }
 }
-
-/**
- * Background-job registry face (`ctx.jobs`, mounted by
- * `@deepseek-ai/dsh-jobs-local` through the base profile), or undefined
- * when the composition does not mount one.
- */
-export function jobsOf(ctx: PluginContext): any {
-    try {
-        return ctx.get("jobs");
-    } catch {
-        return void 0;
-    }
-}

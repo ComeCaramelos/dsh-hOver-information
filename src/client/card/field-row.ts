@@ -18,7 +18,7 @@ const Switch = primitives && primitives.Switch;
 export function ToggleField(props: {
     id: string;
     label: string;
-    /** Full-width copy under the row — the active hint. Omitted for the metric
+    /** Full-width copy under the row — the field's hint. Omitted for the metric
      *  rows, which carry only their title. */
     desc?: string;
     field: { raw?: unknown; overridden?: boolean } | undefined;
