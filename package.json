@@ -1,7 +1,7 @@
 {
   "name": "@comecaramelos/dsh-hover-information",
   "description": "DSH plugin: richer session hover cards — corner icons that copy the session id and workspace path, plus a configurable metrics block (turns, steps, tokens, compactions, context, subagents, …) fed by the hoverInfo projection + Typert remote, gated by the bundle row's own configuration page on the Plugins page",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "author": "Robe ComeCaramelos <hello@comecaramelos.com>",
   "repository": {
     "type": "git",
@@ -52,14 +52,14 @@
     }
   },
   "dependencies": {
-    "@comecaramelos/dsh-ancesters": "^0.2.0",
+    "@comecaramelos/dsh-ancesters": "^0.0.1",
     "@deepseek-ai/cordis": "^4.0.4",
     "@deepseek-ai/dsh-typert-protocol": "^0.2.0-rc.2",
     "@deepseek-ai/schemastery": "^3.18.4",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@comecaramelos/dsh-ancesters": "file:../dsh-ancesters",
+    "@comecaramelos/dsh-ancesters": "^0.0.1",
     "@types/node": "^24.13.6",
     "@types/react": "^18.3.31",
     "@types/react-dom": "^18.3.7",
